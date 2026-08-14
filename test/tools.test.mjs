@@ -1,0 +1,75 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { buildSqlTools, resolveConfig } from '../lib/index.js'
+
+const dir = mkdtempSync(join(tmpdir(), 'dsh-sql-tools-'))
+const cfg = resolveConfig({ connections: [{ name: 'local', engine: 'sqlite', file: join(dir, 'app.db') }], maxRows: 2 })
+const { tools, adapters } = buildSqlTools(cfg)
+const list = tools.find((t) => t.name === 'sql_list')
+const query = tools.find((t) => t.name === 'sql_query')
+const exec = tools.find((t) => t.name === 'sql_exec')
+const schema = tools.find((t) => t.name === 'sql_schema')
+
+test('构建 4 个工具且名字正确', () => {
+  assert.deepEqual(tools.map((t) => t.name).sort(), ['sql_exec', 'sql_list', 'sql_query', 'sql_schema'])
+})
+
+test('每个工具 schema 是 object JSON Schema', () => {
+  for (const tool of tools) {
+    assert.equal(tool.parameters.type, 'object')
+    assert.equal(typeof tool.parameters.properties, 'object')
+    assert.equal(tool.output.schema.type, 'object')
+    assert.equal(typeof tool.output.render, 'function')
+    assert.equal(typeof tool.execute, 'function')
+  }
+})
+
+test('sql_list：连接健康', async () => {
+  const value = await list.execute({})
+  assert.equal(value.connections.length, 1)
+  assert.equal(value.connections[0].ok, true)
+  assert.equal(value.connections[0].name, 'local')
+})
+
+test('sql_exec + sql_query + sql_schema 全链路', async () => {
+  await exec.execute({ sql: 'CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)' })
+  const insert = await exec.execute({ sql: "INSERT INTO items (label) VALUES ('a'), ('b'), ('c')" })
+  assert.equal(insert.changes, 3)
+  const result = await query.execute({ sql: 'SELECT * FROM items ORDER BY id' })
+  assert.equal(result.rowCount, 3)
+  assert.equal(result.rows.length, 2, 'maxRows=2 截断')
+  assert.equal(result.truncated, true)
+  const tables = await schema.execute({})
+  assert.ok(tables.tables.includes('items'))
+  const columns = await schema.execute({ table: 'items' })
+  assert.equal(columns.columns.length, 2)
+  assert.equal(columns.columns[0].primaryKey, true)
+})
+
+test('sql_query 拒绝写语句与多语句', async () => {
+  await assert.rejects(() => query.execute({ sql: 'DROP TABLE items' }), /只接受只读语句/)
+  await assert.rejects(() => query.execute({ sql: 'SELECT 1; SELECT 2' }), /一条语句/)
+})
+
+test('sql_exec 在 readOnly 配置下被禁用', async () => {
+  const ro = buildSqlTools(resolveConfig({ connections: cfg.connections, readOnly: true })).tools
+  const roExec = ro.find((t) => t.name === 'sql_exec')
+  await assert.rejects(() => roExec.execute({ sql: 'INSERT INTO items (label) VALUES (\'x\')' }), /readOnly=true/)
+})
+
+test('未知连接抛中文错误', async () => {
+  await assert.rejects(() => query.execute({ sql: 'SELECT 1', connection: 'nope' }), /未找到名为 nope/)
+})
+
+test('execute 返回值可 JSON 序列化', async () => {
+  const value = await query.execute({ sql: 'SELECT 1 AS one' })
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+})
+
+test('cleanup', async () => {
+  for (const adapter of adapters.values()) await adapter.close()
+  rmSync(dir, { recursive: true, force: true })
+})

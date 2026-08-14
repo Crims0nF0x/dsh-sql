@@ -1,0 +1,86 @@
+[English](README.en.md)
+
+# dsh-sql
+
+> **你的 agent 会查库了**：SQLite / MySQL / PostgreSQL 三引擎，只读白名单 + 写审批门。
+
+DSH（DeepSeek Harness）工程师级数据库插件：四个工具覆盖连接管理、只读查询、写操作与结构探查。
+
+![npm version](https://img.shields.io/npm/v/dsh-sql?label=npm&color=blue) ![npm downloads](https://img.shields.io/npm/dm/dsh-sql) ![license](https://img.shields.io/npm/l/dsh-sql) ![stars](https://img.shields.io/github/stars/STARDUSTLC666/dsh-sql?style=social)
+
+## 安装
+
+```bash
+dsh plugin --profile web add dsh-sql
+```
+
+## 配置
+
+```yaml
+- id: sql
+  name: 'dsh-sql'
+  config:
+    connections:
+      - name: local
+        engine: sqlite
+        file: E:\data\app.db          # 或 :memory:
+      - name: prod
+        engine: postgres
+        host: db.internal
+        database: app
+        # password: xxx              # 推荐环境变量 DSH_SQL_PASSWORD_PROD
+      - name: legacy
+        engine: mysql
+        host: 127.0.0.1
+        port: 3306
+        user: root
+        database: legacy
+    maxRows: 1000                     # 查询返回行数上限（1-10000）
+    readOnly: false                   # true 时禁用 sql_exec
+    writeApproval: true               # 写操作先弹审批（默认 true）
+```
+
+## 工具一览
+
+| 工具 | 作用 | 安全 |
+| :-- | :-- | :-- |
+| `sql_list` | 列出连接 + 连通性测试 | — |
+| `sql_query` | 只读查询（SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH）| 关键字白名单 + 拒绝多语句 |
+| `sql_exec` | 写操作/DDL（可多语句脚本）| readOnly 禁用 + 审批门 |
+| `sql_schema` | 表清单 / 表结构 | 标识符白名单校验 |
+
+### 示例
+
+```text
+sql_list {}
+sql_schema {}                                  # 列出所有表
+sql_schema { table: users }                    # 看 users 表结构
+sql_query { sql: SELECT * FROM orders WHERE status = 'pending' LIMIT 50 }
+sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
+```
+
+## 安全设计
+
+- **只读白名单**：sql_query 只放行 SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH，多语句直接拒绝
+- **写审批门**：sql_exec 默认弹审批（对齐 dsh-email 的发信审批），headless 环境无审批通道时拒绝执行
+- **readOnly 模式**：生产库可整体禁用写
+- **行数钳制**：maxRows 上限 10000，超量截断并标记 truncated
+- **标识符校验**：表名只允许字母/数字/下划线，杜绝 schema 注入
+- **密钥不落配置**：密码支持 `DSH_SQL_PASSWORD_<连接名>` 环境变量
+
+## 引擎
+
+- **SQLite**：Node 22.13+ 内置 `node:sqlite`，零依赖
+- **MySQL**：mysql2 连接池
+- **PostgreSQL**：pg 连接池
+
+## 开发
+
+```bash
+pnpm install
+pnpm test       # 构建 + 27 个测试（含真实 SQLite 集成）
+```
+
+## License
+
+MIT
