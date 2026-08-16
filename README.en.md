@@ -38,6 +38,8 @@ dsh plugin --profile web add dsh-sql
         user: root
         database: legacy
     maxRows: 1000                     # query row cap (1-10000)
+    queryTimeoutMs: 60000             # per-query timeout (default 60s, 5s - 10min)
+    execTimeoutMs: 120000             # per-write timeout (default 120s, 5s - 10min)
     readOnly: false                   # true disables sql_exec
     writeApproval: true               # approve write operations first (default true)
 ```
@@ -80,7 +82,7 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ```bash
 pnpm install
-pnpm test       # build + 33 tests, including a real SQLite integration suite
+pnpm test       # build + 35 tests, including a real SQLite integration suite
 ```
 
 ## License

@@ -38,6 +38,8 @@ dsh plugin --profile web add dsh-sql
         user: root
         database: legacy
     maxRows: 1000                     # 查询返回行数上限（1-10000）
+    queryTimeoutMs: 60000             # 单次查询超时（默认 60 秒，5 秒 - 10 分钟）
+    execTimeoutMs: 120000             # 单次写操作超时（默认 120 秒，5 秒 - 10 分钟）
     readOnly: false                   # true 时禁用 sql_exec
     writeApproval: true               # 写操作先弹审批（默认 true）
 ```
@@ -80,7 +82,7 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ```bash
 pnpm install
-pnpm test       # 构建 + 33 个测试（含真实 SQLite 集成）
+pnpm test       # 构建 + 35 个测试（含真实 SQLite 集成）
 ```
 
 ## License
