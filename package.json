@@ -39,7 +39,8 @@
     "sqlite",
     "mysql",
     "postgresql",
-    "database"
+    "database",
+    "dsh-plugin"
   ],
   "license": "MIT",
   "engines": {
