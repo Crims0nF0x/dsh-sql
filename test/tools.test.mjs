@@ -13,6 +13,18 @@ const query = tools.find((t) => t.name === 'sql_query')
 const exec = tools.find((t) => t.name === 'sql_exec')
 const schema = tools.find((t) => t.name === 'sql_schema')
 
+test('工具 timeoutMs 取配置值', () => {
+  const timed = buildSqlTools(resolveConfig({
+    connections: cfg.connections,
+    maxRows: 2,
+    queryTimeoutMs: 15000,
+    execTimeoutMs: 30000,
+  })).tools
+  assert.equal(timed.find((t) => t.name === 'sql_query').timeoutMs, 15000)
+  assert.equal(timed.find((t) => t.name === 'sql_exec').timeoutMs, 30000)
+  assert.equal(timed.find((t) => t.name === 'sql_list').timeoutMs, 30000)
+})
+
 test('构建 4 个工具且名字正确', () => {
   assert.deepEqual(tools.map((t) => t.name).sort(), ['sql_exec', 'sql_list', 'sql_query', 'sql_schema'])
 })

@@ -34,6 +34,17 @@ test('配置非法抛中文错误', () => {
   assert.throws(() => resolveConfig({ maxRows: -1 }), /maxRows/)
 })
 
+test('queryTimeoutMs / execTimeoutMs 默认、校验与钳制', () => {
+  const defaults = resolveConfig({})
+  assert.equal(defaults.queryTimeoutMs, 60000)
+  assert.equal(defaults.execTimeoutMs, 120000)
+  const custom = resolveConfig({ queryTimeoutMs: 7000, execTimeoutMs: 9999999 })
+  assert.equal(custom.queryTimeoutMs, 7000)
+  assert.equal(custom.execTimeoutMs, 600000)
+  assert.throws(() => resolveConfig({ queryTimeoutMs: -1 }), /queryTimeoutMs/)
+  assert.throws(() => resolveConfig({ execTimeoutMs: 'x' }), /execTimeoutMs/)
+})
+
 test('maxRows 钳制到 10000；readOnly 解析', () => {
   assert.equal(resolveConfig({ maxRows: 999999 }).maxRows, 10000)
   assert.equal(resolveConfig({ readOnly: true }).readOnly, true)
