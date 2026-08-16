@@ -22,6 +22,8 @@ export interface SqlConfig {
   maxRows?: number
   readOnly?: boolean
   writeApproval?: boolean
+  queryTimeoutMs?: number
+  execTimeoutMs?: number
 }
 
 /** 解析后的配置。 */
@@ -30,6 +32,8 @@ export interface ResolvedSqlConfig {
   maxRows: number
   readOnly: boolean
   writeApproval: boolean
+  queryTimeoutMs: number
+  execTimeoutMs: number
 }
 
 const ENGINES = ['sqlite', 'mysql', 'postgres'] as const
@@ -77,9 +81,19 @@ export function resolveConfig(config: SqlConfig | undefined | null, env: NodeJS.
     if (typeof cfg.maxRows !== 'number' || !Number.isInteger(cfg.maxRows) || cfg.maxRows <= 0) throw new Error('maxRows 必须是大于 0 的整数。')
     maxRows = Math.min(10000, cfg.maxRows)
   }
+  let queryTimeoutMs = 60000
+  if (cfg.queryTimeoutMs !== undefined) {
+    if (typeof cfg.queryTimeoutMs !== 'number' || !Number.isFinite(cfg.queryTimeoutMs) || cfg.queryTimeoutMs <= 0) throw new Error('queryTimeoutMs 必须是大于 0 的数字（毫秒）。')
+    queryTimeoutMs = Math.min(600000, Math.max(5000, Math.round(cfg.queryTimeoutMs)))
+  }
+  let execTimeoutMs = 120000
+  if (cfg.execTimeoutMs !== undefined) {
+    if (typeof cfg.execTimeoutMs !== 'number' || !Number.isFinite(cfg.execTimeoutMs) || cfg.execTimeoutMs <= 0) throw new Error('execTimeoutMs 必须是大于 0 的数字（毫秒）。')
+    execTimeoutMs = Math.min(600000, Math.max(5000, Math.round(cfg.execTimeoutMs)))
+  }
   const readOnly = cfg.readOnly === true
   const writeApproval = cfg.writeApproval !== false
-  return { connections, maxRows, readOnly, writeApproval }
+  return { connections, maxRows, readOnly, writeApproval, queryTimeoutMs, execTimeoutMs }
 }
 
 /** 校验表名/标识符，防注入到 schema 语句。 */

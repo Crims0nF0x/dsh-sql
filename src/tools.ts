@@ -319,7 +319,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         maxRows: cfg.maxRows,
       }
     },
-    timeoutMs: 60000,
+    timeoutMs: cfg.queryTimeoutMs,
   }
 
   const sqlExec: SqlToolDefinition = {
@@ -347,7 +347,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
     gate(exec: unknown, next: () => Promise<unknown>): Promise<unknown> {
       return next() // 审批门由 index.ts 注入（需要宿主 ctx）
     },
-    timeoutMs: 120000,
+    timeoutMs: cfg.execTimeoutMs,
   }
 
   const sqlSchema: SqlToolDefinition = {
