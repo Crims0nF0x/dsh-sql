@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildSqlTools, resolveConfig } from '../lib/index.js'
+import { buildSqlTools, resolveConfig, assertReadQuery } from '../lib/index.js'
 
 const dir = mkdtempSync(join(tmpdir(), 'dsh-sql-tools-'))
 const cfg = resolveConfig({ connections: [{ name: 'local', engine: 'sqlite', file: join(dir, 'app.db') }], maxRows: 2 })
@@ -67,6 +67,25 @@ test('未知连接抛中文错误', async () => {
 test('execute 返回值可 JSON 序列化', async () => {
   const value = await query.execute({ sql: 'SELECT 1 AS one' })
   assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
+})
+
+test('assertReadQuery 不误伤字符串/注释里的分号与写关键字', () => {
+  assert.equal(assertReadQuery("SELECT 'delete;' AS label"), "SELECT 'delete;' AS label")
+  assert.equal(assertReadQuery('SELECT 1 -- 注释里的 update\n'), 'SELECT 1 -- 注释里的 update')
+  assert.equal(assertReadQuery('SELECT $tag$; update$tag$ AS body'), 'SELECT $tag$; update$tag$ AS body')
+  assert.equal(assertReadQuery("SELECT data #>> '{a,b}' AS value FROM t"), "SELECT data #>> '{a,b}' AS value FROM t")
+})
+
+test('assertReadQuery 拒绝 data-modifying CTE / INTO OUTFILE / 行锁 / PRAGMA 赋值', () => {
+  assert.throws(() => assertReadQuery('WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone'), /DELETE/)
+  assert.throws(() => assertReadQuery("SELECT * FROM t INTO OUTFILE '/tmp/x'"), /INTO/)
+  assert.throws(() => assertReadQuery('SELECT * FROM t FOR UPDATE'), /FOR UPDATE/)
+  assert.throws(() => assertReadQuery('PRAGMA journal_mode = WAL'), /PRAGMA 写操作/)
+})
+
+test('assertReadQuery 放行 SHOW CREATE TABLE 等元数据语句', () => {
+  assert.equal(assertReadQuery('SHOW CREATE TABLE users'), 'SHOW CREATE TABLE users')
+  assert.equal(assertReadQuery('EXPLAIN SELECT 1'), 'EXPLAIN SELECT 1')
 })
 
 test('cleanup', async () => {

@@ -63,10 +63,10 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ## Safety
 
-- **Read-only whitelist**: sql_query only allows SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH; multi-statement queries are rejected outright
+- **Lexer-grade read-only guard**: sql_query strips strings/comments before validation, then rejects data-modifying CTEs (WITH…DELETE/UPDATE), SELECT INTO, FOR UPDATE/FOR SHARE, PRAGMA assignment, and multi-statement input
 - **Write approval gate**: sql_exec asks for approval by default (mirroring dsh-email's send approval); headless environments without an approval channel are denied
 - **readOnly mode**: lock out writes entirely for production databases
-- **Row clamping**: maxRows capped at 10000, overflow flagged with truncated
+- **Streaming row cap**: SQLite iterator / MySQL stream / PostgreSQL portal all stop at maxRows+1, so large queries are never fully materialized; overflow is flagged with truncated
 - **Identifier validation**: table names restricted to alphanumerics and underscores — no schema injection
 - **Secrets stay out of config**: passwords via `DSH_SQL_PASSWORD_<CONNECTION>` env vars
 
@@ -80,7 +80,7 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ```bash
 pnpm install
-pnpm test       # build + 27 tests, including a real SQLite integration suite
+pnpm test       # build + 33 tests, including a real SQLite integration suite
 ```
 
 ## License

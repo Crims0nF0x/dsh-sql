@@ -1,7 +1,7 @@
 {
   "name": "dsh-sql",
-  "version": "0.1.1",
-  "description": "DSH 工程师级数据库插件：sql_list/query/exec/schema 四工具，SQLite/MySQL/PostgreSQL 三引擎、多连接、只读模式与写操作审批门、行数钳制。",
+  "version": "0.2.0",
+  "description": "DSH 工程师级数据库插件：sql_list/query/exec/schema 四工具，SQLite/MySQL/PostgreSQL 三引擎、多连接、只读模式与写操作审批门、词法级只读保护与流式行数钳制。",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

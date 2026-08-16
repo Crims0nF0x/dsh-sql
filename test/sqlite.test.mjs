@@ -32,6 +32,13 @@ test('SQLite：exec 返回 changes，多语句返回 0', async () => {
   assert.equal(multi, 0)
 })
 
+test('SQLite：query(limit) 只迭代前 N 行，不全量载入', async () => {
+  const capped = await adapter.query('SELECT id, name FROM users ORDER BY id', 1)
+  assert.deepEqual(capped.columns, ['id', 'name'])
+  assert.equal(capped.rows.length, 1)
+  assert.deepEqual(capped.rows[0], [1, '张三'])
+})
+
 test('SQLite：ping 与关闭', async () => {
   await adapter.ping()
   await adapter.close()

@@ -63,10 +63,10 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ## 安全设计
 
-- **只读白名单**：sql_query 只放行 SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH，多语句直接拒绝
+- **词法级只读保护**：sql_query 先剥离字符串/注释再校验，拒绝 data-modifying CTE（WITH…DELETE/UPDATE）、SELECT INTO、FOR UPDATE/FOR SHARE、PRAGMA 赋值与多语句
 - **写审批门**：sql_exec 默认弹审批（对齐 dsh-email 的发信审批），headless 环境无审批通道时拒绝执行
 - **readOnly 模式**：生产库可整体禁用写
-- **行数钳制**：maxRows 上限 10000，超量截断并标记 truncated
+- **流式行数钳制**：SQLite 迭代器 / MySQL stream / PostgreSQL portal 都按 maxRows+1 停表，大查询不会全量载入内存，超量标记 truncated
 - **标识符校验**：表名只允许字母/数字/下划线，杜绝 schema 注入
 - **密钥不落配置**：密码支持 `DSH_SQL_PASSWORD_<连接名>` 环境变量
 
@@ -80,7 +80,7 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ```bash
 pnpm install
-pnpm test       # 构建 + 27 个测试（含真实 SQLite 集成）
+pnpm test       # 构建 + 33 个测试（含真实 SQLite 集成）
 ```
 
 ## License

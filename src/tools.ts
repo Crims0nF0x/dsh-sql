@@ -57,15 +57,105 @@ function requiredString(args: Record<string, unknown>, key: string, label: strin
 /** 只读语句关键字白名单。 */
 const READ_KEYWORDS = /^(select|pragma|explain|show|describe|desc|with)\b/i
 
-/** 校验只读查询：白名单开头 + 拒绝多语句。 */
-function assertReadQuery(sql: string): string {
+/** 去掉字符串、引号标识符与注释，保留真实 SQL 关键字与分号。 */
+function stripSqlNoise(sql: string): string {
+  let out = ''
+  let i = 0
+  while (i < sql.length) {
+    const ch = sql[i]
+    const next = sql[i + 1]
+    if (ch === '-' && next === '-') {
+      i += 2
+      while (i < sql.length && sql[i] !== '\n') i += 1
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      i += 2
+      while (i + 1 < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) i += 1
+      i += 2
+      continue
+    }
+    if (ch === '#' && (i === 0 || /\s/.test(sql[i - 1]))) {
+      if (/^#(?:>>?|-)/.test(sql.slice(i))) {
+        out += ch
+        i += 1
+        continue
+      }
+      i += 1
+      while (i < sql.length && sql[i] !== '\n') i += 1
+      continue
+    }
+    if (ch === "'") {
+      out += ' '
+      i += 1
+      while (i < sql.length) {
+        if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue }
+        if (sql[i] === "'") { i += 1; break }
+        if (sql[i] === '\\') { i += 2; continue }
+        i += 1
+      }
+      continue
+    }
+    if (ch === '"' || ch === '`') {
+      out += ' '
+      i += 1
+      while (i < sql.length) {
+        if (sql[i] === ch) { i += 1; break }
+        if (sql[i] === '\\') { i += 2; continue }
+        i += 1
+      }
+      continue
+    }
+    if (ch === '[') {
+      out += ' '
+      i += 1
+      while (i < sql.length && sql[i] !== ']') i += 1
+      i += 1
+      continue
+    }
+    if (ch === '$') {
+      const dollar = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sql.slice(i))
+      if (dollar !== null) {
+        out += ' '
+        i += dollar[0].length
+        const end = sql.indexOf(dollar[0], i)
+        i = end === -1 ? sql.length : end + dollar[0].length
+        continue
+      }
+    }
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+/** 写操作关键字：出在 SELECT/EXPLAIN/WITH 语句里即拒绝。 */
+const WRITE_KEYWORDS = /\b(insert|update|delete|replace|merge|drop|alter|create|truncate|call|execute|copy|grant|revoke|attach|detach|vacuum|reindex|refresh|set|reset|begin|commit|rollback|savepoint|release|analyze|load_extension)\b/gi
+
+/** 校验只读查询：词法去噪后白名单开头 + 写关键字扫描 + 单语句。 */
+export function assertReadQuery(sql: string): string {
   const trimmed = sql.trim()
-  if (!READ_KEYWORDS.test(trimmed)) {
+  const clean = stripSqlNoise(trimmed)
+  const first = /^[a-z]+/i.exec(clean.trim())?.[0]?.toLowerCase() ?? ''
+  if (!READ_KEYWORDS.test(clean.trim())) {
     throw new Error('sql_query 只接受只读语句（SELECT / PRAGMA / EXPLAIN / SHOW / DESCRIBE / WITH）。写操作请用 sql_exec。')
   }
-  const statements = trimmed.split(';').filter((part) => part.trim() !== '')
+  const statements = clean.split(';').filter((part) => part.trim() !== '')
   if (statements.length > 1) throw new Error('sql_query 一次只允许一条语句。')
-  return statements[0].trim()
+  const single = statements[0]?.trim() ?? ''
+  if (first === 'pragma') {
+    if (/=/.test(single)) throw new Error('sql_query 不接受带赋值参数的 PRAGMA 写操作（如 PRAGMA journal_mode=WAL），请用 sql_exec。')
+  } else if (first === 'show' || first === 'describe' || first === 'desc') {
+    // SHOW / DESCRIBE 本身只读，不再扫写关键字（避免误伤 SHOW CREATE TABLE）。
+  } else {
+    if (/\binto\b/i.test(single)) throw new Error('sql_query 不接受 SELECT INTO（写表或 OUTFILE），请用 sql_exec。')
+    if (/\bfor\s+(update|no\s+key\s+update|share|key\s+share)\b/i.test(single)) throw new Error('sql_query 不接受 FOR UPDATE/FOR SHARE 行锁查询，请用 sql_exec。')
+    const hit = WRITE_KEYWORDS.exec(single)
+    if (hit !== null) {
+      throw new Error('检测到写操作关键字 ' + hit[0].toUpperCase() + '，sql_query 只接受只读查询。写操作请用 sql_exec。')
+    }
+  }
+  return trimmed.replace(/;+\s*$/, '').trim()
 }
 
 const querySchema = {
@@ -195,7 +285,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
 
   const sqlQuery: SqlToolDefinition = {
     name: 'sql_query',
-    description: '执行只读 SQL 查询（SELECT / PRAGMA / EXPLAIN / SHOW / DESCRIBE / WITH）。connection 为连接名（缺省第一个连接）。返回列名与行数据，最多 maxRows 行（超出 truncated=true）。写操作请用 sql_exec。',
+    description: '执行只读 SQL 查询（SELECT / PRAGMA / EXPLAIN / SHOW / DESCRIBE / WITH）。词法级校验会拒绝 data-modifying CTE、SELECT INTO、FOR UPDATE/FOR SHARE、PRAGMA 赋值与多语句。connection 为连接名（缺省第一个连接）。返回列名与行数据，最多 maxRows 行（超出 truncated=true）。写操作请用 sql_exec。',
     parameters: compileParameters({
       sql: { type: 'string', required: true, description: '只读 SQL 语句（必填，单条）。' },
       connection: { type: 'string', description: '连接名（可选，缺省第一个连接）。' },
@@ -217,7 +307,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
       const args = asRecord(rawArgs)
       const sql = assertReadQuery(requiredString(args, 'sql', 'SQL 语句'))
       const { adapter, name } = getAdapter(optionalString(args, 'connection'))
-      const result = await adapter.query(sql)
+      const result = await adapter.query(sql, cfg.maxRows + 1)
       const total = result.rows.length
       const rows = result.rows.slice(0, cfg.maxRows)
       return {
