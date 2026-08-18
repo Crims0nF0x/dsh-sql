@@ -12,6 +12,7 @@ import { resolveConfig, type SqlConfig } from './config.js'
 import { buildSqlTools, type SqlToolDefinition } from './tools.js'
 
 /** cordis 服务注入：apply 里要用 ctx.tools，必须显式声明。 */
+export const name = 'sql'
 export const inject = ['tools']
 
 /** 审批服务最小面（对齐 dsh-email）。 */
