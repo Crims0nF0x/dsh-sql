@@ -12,8 +12,8 @@
 #           engine: sqlite
 #           file: E:\data\app.db
 #       maxRows: 1000      # sql_query 返回行数上限（1-10000，默认 1000）
-      queryTimeoutMs: 60000 # 单次查询超时（5 秒 - 10 分钟）
-      execTimeoutMs: 120000 # 单次写操作超时（5 秒 - 10 分钟）
+#       queryTimeoutMs: 60000 # 单次查询超时（5 秒 - 10 分钟）
+#       execTimeoutMs: 120000 # 单次写操作超时（5 秒 - 10 分钟）
 #       readOnly: false    # true 时 sql_exec 被禁用
 #       writeApproval: true # 写操作先弹审批（默认 true）
 #
