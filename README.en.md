@@ -10,11 +10,24 @@ DSH (DeepSeek Harness) engineer-grade database plugin: four tools covering conne
 
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
+## Compatibility
+
+Verified against `@deepseek-ai/dsh@0.1.1-rc.2` on 2026-08-26. Built for the cordis patch-bundle plugin model (`cordis.patch.yml` + `dsh.bundle.patch`). No runtime imports of `@deepseek-ai/*` internals.
+
 ## Installation
 
 ```bash
 dsh plugin --profile web add dsh-sql
 ```
+
+## Uninstall
+
+```bash
+dsh plugin --profile web remove dsh-sql
+```
+
+Then restart the web service. To clean up fully, also remove the plugin entry from your profile `cordis.patch.yml` if you overrode it.
+
 
 ## Configuration
 

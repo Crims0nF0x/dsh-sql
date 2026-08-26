@@ -10,11 +10,24 @@ DSH（DeepSeek Harness）工程师级数据库插件：四个工具覆盖连接�
 
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
+## 兼容性
+
+在 `@deepseek-ai/dsh@0.1.1-rc.2` 上验证（2026-08-26）。遵循 cordis 组合包补丁模型（`cordis.patch.yml` + `dsh.bundle.patch`），运行时不 import 任何 `@deepseek-ai/*` 内部模块。
+
 ## 安装
 
 ```bash
 dsh plugin --profile web add dsh-sql
 ```
+
+## 卸载
+
+```bash
+dsh plugin --profile web remove dsh-sql
+```
+
+卸载后重启 Web 服务。如需彻底清理，可再手动删除自己 profile `cordis.patch.yml` 中覆盖的插件行。
+
 
 ## 配置
 
