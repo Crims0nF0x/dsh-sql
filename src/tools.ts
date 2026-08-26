@@ -1,5 +1,5 @@
 /**
- * 四个面向模型的数据库工具：sql_list / sql_query / sql_exec / sql_schema。
+ * 六个面向模型的数据库工具：sql_list / sql_query / sql_exec / sql_schema / sql_stats / sql_health。
  *
  * @module dsh-sql/tools
  */
@@ -167,6 +167,8 @@ const querySchema = {
     rowCount: { type: 'integer' },
     truncated: { type: 'boolean' },
     maxRows: { type: 'integer' },
+    format: { type: 'string' },
+    formatted: { type: 'string' },
   },
   additionalProperties: true,
 }
@@ -213,6 +215,76 @@ const schemaToolSchema = {
   additionalProperties: true,
 }
 
+// ---------- 输出格式与统计辅助 ----------
+
+/** 按引擎给标识符加引号，防止表名破坏 SQL。 */
+function quoteIdent(engine: string, name: string): string {
+  if (engine === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
+  return '"' + name.replace(/"/g, '""') + '"'
+}
+
+/** 查询结果转 CSV 文本（RFC 4180 风格转义）。 */
+export function toCsv(columns: string[], rows: unknown[][]): string {
+  const escape = (cell: unknown): string => {
+    if (cell === null || cell === undefined) return ''
+    const text = Array.isArray(cell) || typeof cell === 'object' ? JSON.stringify(cell) : String(cell)
+    return /[",\n\r]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text
+  }
+  const lines = [columns.map(escape).join(',')]
+  for (const row of rows) lines.push(row.map(escape).join(','))
+  return lines.join('\n')
+}
+
+/** 人类可读的字节数。 */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+  return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB'
+}
+
+/** 库体积：SQLite 用页数×页大小；MySQL/PostgreSQL 走系统函数；失败抛错由调用方兜底。 */
+async function databaseSize(adapter: DatabaseAdapter, engine: string): Promise<number> {
+  if (engine === 'sqlite') {
+    const pageCount = await adapter.query('PRAGMA page_count', 1)
+    const pageSize = await adapter.query('PRAGMA page_size', 1)
+    return Number(pageCount.rows[0]?.[0] ?? 0) * Number(pageSize.rows[0]?.[0] ?? 0)
+  }
+  if (engine === 'mysql') {
+    const result = await adapter.query('SELECT SUM(DATA_LENGTH + INDEX_LENGTH) FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()', 1)
+    return Number(result.rows[0]?.[0] ?? -1)
+  }
+  const result = await adapter.query('SELECT pg_database_size(current_database())', 1)
+  return Number(result.rows[0]?.[0] ?? -1)
+}
+
+const statsSchema = {
+  type: 'object',
+  properties: {
+    connection: { type: 'string' },
+    engine: { type: 'string' },
+    tableCount: { type: 'integer' },
+    tables: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    sizeBytes: { type: 'integer' },
+  },
+  additionalProperties: true,
+}
+
+const healthSchema = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean' },
+    plugin: { type: 'string' },
+    connections: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    readOnly: { type: 'boolean' },
+    writeApproval: { type: 'boolean' },
+    maxRows: { type: 'integer' },
+    queryTimeoutMs: { type: 'integer' },
+    execTimeoutMs: { type: 'integer' },
+  },
+  additionalProperties: true,
+}
+
 /** 审批执行上下文的最小面。 */
 export interface SqlExecGateContext {
   agent?: unknown
@@ -240,6 +312,29 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
     return { adapter, name: connection.name }
   }
 
+  const pingAllConnections = async (): Promise<Array<Record<string, unknown>>> => {
+    const rows: Array<Record<string, unknown>> = []
+    for (const connection of cfg.connections) {
+      const entry: Record<string, unknown> = { name: connection.name, engine: connection.engine }
+      if (connection.engine === 'sqlite') entry.file = connection.file ?? ':memory:'
+      else {
+        entry.host = connection.host ?? ''
+        entry.database = connection.database ?? ''
+      }
+      try {
+        const { adapter } = getAdapter(connection.name)
+        await adapter.ping()
+        entry.ok = true
+        entry.error = ''
+      } catch (error) {
+        entry.ok = false
+        entry.error = error instanceof Error ? error.message : String(error)
+      }
+      rows.push(entry)
+    }
+    return rows
+  }
+
   const sqlList: SqlToolDefinition = {
     name: 'sql_list',
     description: '列出配置的数据库连接并逐一做连通性测试（SELECT 1）。返回连接名、引擎、目标与健康状态。',
@@ -259,26 +354,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
       },
     },
     async execute() {
-      const rows: Array<Record<string, unknown>> = []
-      for (const connection of cfg.connections) {
-        const entry: Record<string, unknown> = { name: connection.name, engine: connection.engine }
-        if (connection.engine === 'sqlite') entry.file = connection.file ?? ':memory:'
-        else {
-          entry.host = connection.host ?? ''
-          entry.database = connection.database ?? ''
-        }
-        try {
-          const { adapter } = getAdapter(connection.name)
-          await adapter.ping()
-          entry.ok = true
-          entry.error = ''
-        } catch (error) {
-          entry.ok = false
-          entry.error = error instanceof Error ? error.message : String(error)
-        }
-        rows.push(entry)
-      }
-      return { connections: rows }
+      return { connections: await pingAllConnections() }
     },
     timeoutMs: 30000,
   }
@@ -289,11 +365,16 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
     parameters: compileParameters({
       sql: { type: 'string', required: true, description: '只读 SQL 语句（必填，单条）。' },
       connection: { type: 'string', description: '连接名（可选，缺省第一个连接）。' },
+      format: { type: 'string', description: '输出格式：table（默认表格）/ csv / json。csv 与 json 会额外返回 formatted 文本，便于落盘或转存。' },
     }),
     output: {
       schema: querySchema,
       render: (_args, value) => {
         const rec = asRecord(value)
+        if (typeof rec.formatted === 'string' && rec.formatted !== '') {
+          const preview = rec.formatted.length > 4000 ? rec.formatted.slice(0, 4000) + '\n…（预览已截断）' : rec.formatted
+          return [{ type: 'text', text: '查询返回 ' + rec.rowCount + ' 行（' + String(rec.format) + ' 格式）：\n' + preview }]
+        }
         const rows = Array.isArray(rec.rows) ? rec.rows : []
         const lines = ['查询返回 ' + rec.rowCount + ' 行' + (rec.truncated === true ? '（截断到 ' + rec.maxRows + ' 行）' : '') + '，列：' + (Array.isArray(rec.columns) ? rec.columns.join(', ') : '')]
         for (const row of rows.slice(0, 20)) {
@@ -310,7 +391,8 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
       const result = await adapter.query(sql, cfg.maxRows + 1)
       const total = result.rows.length
       const rows = result.rows.slice(0, cfg.maxRows)
-      return {
+      const format = optionalString(args, 'format')?.toLowerCase() ?? 'table'
+      const base = {
         connection: name,
         columns: result.columns,
         rows,
@@ -318,6 +400,12 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         truncated: total > cfg.maxRows,
         maxRows: cfg.maxRows,
       }
+      if (format === 'csv') return { ...base, format, formatted: toCsv(result.columns, rows) }
+      if (format === 'json') {
+        const objects = rows.map((row) => Object.fromEntries(result.columns.map((column, i) => [column, row[i]])))
+        return { ...base, format, formatted: JSON.stringify(objects, null, 2) }
+      }
+      return base
     },
     timeoutMs: cfg.queryTimeoutMs,
   }
@@ -388,5 +476,102 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
     timeoutMs: 30000,
   }
 
-  return { tools: [sqlList, sqlQuery, sqlExec, sqlSchema], adapters }
+  const sqlStats: SqlToolDefinition = {
+    name: 'sql_stats',
+    description: '数据库概览统计：表数量、每张表的行数、库体积（SQLite 按页计算，MySQL/PostgreSQL 走系统表）。connection 为连接名（缺省第一个连接）。适合在写查询前先了解数据规模。',
+    parameters: compileParameters({
+      connection: { type: 'string', description: '连接名（可选，缺省第一个连接）。' },
+    }),
+    output: {
+      schema: statsSchema,
+      render: (_args, value) => {
+        const rec = asRecord(value)
+        const tables = Array.isArray(rec.tables) ? rec.tables : []
+        const lines = ['连接 ' + rec.connection + '（' + rec.engine + '）：共 ' + tables.length + ' 张表' + (typeof rec.sizeBytes === 'number' && rec.sizeBytes >= 0 ? '，库体积 ' + formatBytes(rec.sizeBytes) : '') + '。']
+        for (const item of tables.slice(0, 30)) {
+          const t = asRecord(item)
+          lines.push('- ' + t.name + '：' + (typeof t.rowCount === 'number' ? t.rowCount + ' 行' : '行数未知' + (t.error ? '（' + t.error + '）' : '')))
+        }
+        if (tables.length > 30) lines.push('…仅展示前 30 张表')
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(rawArgs: unknown) {
+      const args = asRecord(rawArgs)
+      const { adapter, name } = getAdapter(optionalString(args, 'connection'))
+      const engine = adapter.engine
+      let sizeBytes = -1
+      try {
+        sizeBytes = await databaseSize(adapter, engine)
+      } catch {
+        sizeBytes = -1
+      }
+      const tables: Array<Record<string, unknown>> = []
+      if (engine === 'mysql' || engine === 'postgres') {
+        try {
+          const sql = engine === 'mysql'
+            ? 'SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()'
+            : 'SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY relname'
+          const result = await adapter.query(sql)
+          for (const row of result.rows) {
+            tables.push({ name: String(row[0]), rowCount: typeof row[1] === 'number' ? row[1] : Number(row[1] ?? 0) })
+          }
+        } catch (error) {
+          tables.push({ name: '', error: error instanceof Error ? error.message : String(error) })
+        }
+      } else {
+        const names = await adapter.listTables()
+        for (const table of names) {
+          try {
+            const result = await adapter.query('SELECT COUNT(*) FROM ' + quoteIdent(engine, table), 1)
+            tables.push({ name: table, rowCount: Number(result.rows[0]?.[0] ?? 0) })
+          } catch (error) {
+            tables.push({ name: table, error: error instanceof Error ? error.message : String(error) })
+          }
+        }
+      }
+      return { connection: name, engine, tableCount: tables.filter((t) => t.name !== '').length, tables, sizeBytes }
+    },
+    timeoutMs: cfg.queryTimeoutMs,
+  }
+
+  const sqlHealth: SqlToolDefinition = {
+    name: 'sql_health',
+    description: 'dsh-sql 自检：逐个连接做连通性测试，并汇总安全配置（只读模式、写审批门、行数上限、超时）。遇到问题时先运行本工具定位。',
+    parameters: compileParameters({}),
+    output: {
+      schema: healthSchema,
+      render: (_args, value) => {
+        const rec = asRecord(value)
+        const connections = Array.isArray(rec.connections) ? rec.connections : []
+        const bad = connections.filter((c) => asRecord(c).ok !== true)
+        const lines = ['dsh-sql 自检' + (bad.length === 0 ? '：全部连接正常。' : '：' + bad.length + ' 个连接异常。')]
+        for (const item of connections) {
+          const c = asRecord(item)
+          lines.push('- ' + c.name + '（' + c.engine + '）' + (c.ok === true ? ' ✅' : ' ❌ ' + String(c.error ?? '')))
+        }
+        lines.push('- 只读模式：' + (rec.readOnly === true ? '开（sql_exec 已禁用）' : '关'))
+        lines.push('- 写审批门：' + (rec.writeApproval === true ? '开' : '关'))
+        lines.push('- 行数上限：' + String(rec.maxRows) + '；查询超时 ' + String(rec.queryTimeoutMs) + 'ms；写超时 ' + String(rec.execTimeoutMs) + 'ms')
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute() {
+      const connections = await pingAllConnections()
+      const bad = connections.filter((c) => c.ok !== true)
+      return {
+        ok: bad.length === 0,
+        plugin: 'dsh-sql',
+        connections,
+        readOnly: cfg.readOnly,
+        writeApproval: cfg.writeApproval,
+        maxRows: cfg.maxRows,
+        queryTimeoutMs: cfg.queryTimeoutMs,
+        execTimeoutMs: cfg.execTimeoutMs,
+      }
+    },
+    timeoutMs: 30000,
+  }
+
+  return { tools: [sqlList, sqlQuery, sqlExec, sqlSchema, sqlStats, sqlHealth], adapters }
 }

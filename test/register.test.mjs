@@ -31,10 +31,10 @@ test('inject 声明 tools', () => {
   assert.deepEqual(inject, ['tools'])
 })
 
-test('apply 注册 4 个工具（prepend 审批门）', () => {
+test('apply 注册 6 个工具（prepend 审批门）', () => {
   const { ctx, registered } = makeFakeCtx({ request: async () => 'allowed-once' })
   apply(ctx, {})
-  assert.equal(registered.length, 4)
+  assert.equal(registered.length, 6)
   assert.equal(registered[0].options.prepend, true)
 })
 
@@ -73,7 +73,7 @@ test('writeApproval=false 时不注入审批门', async () => {
 test('dispose 卸载全部工具', () => {
   const { ctx, registered, listeners } = makeFakeCtx({ request: async () => 'allowed-once' })
   apply(ctx, {})
-  assert.equal(registered.length, 4)
+  assert.equal(registered.length, 6)
   for (const listener of listeners.dispose ?? []) listener()
   assert.equal(registered.length, 0)
 })

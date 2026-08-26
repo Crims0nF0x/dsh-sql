@@ -25,8 +25,8 @@ test('工具 timeoutMs 取配置值', () => {
   assert.equal(timed.find((t) => t.name === 'sql_list').timeoutMs, 30000)
 })
 
-test('构建 4 个工具且名字正确', () => {
-  assert.deepEqual(tools.map((t) => t.name).sort(), ['sql_exec', 'sql_list', 'sql_query', 'sql_schema'])
+test('构建 6 个工具且名字正确', () => {
+  assert.deepEqual(tools.map((t) => t.name).sort(), ['sql_exec', 'sql_health', 'sql_list', 'sql_query', 'sql_schema', 'sql_stats'])
 })
 
 test('每个工具 schema 是 object JSON Schema', () => {
