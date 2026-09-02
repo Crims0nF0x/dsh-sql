@@ -12,25 +12,30 @@ import { type SqlToolDefinition } from './tools.js';
 /** cordis 服务注入：apply 里要用 ctx.tools，必须显式声明。 */
 export declare const name = "sql";
 export declare const inject: string[];
-/** 审批服务最小面（对齐 dsh-email）。 */
-export interface SqlApproval {
-    request(options: {
-        agent?: unknown;
-        toolName?: unknown;
-        callId?: unknown;
-        reason: string;
-        signal?: unknown;
-    }): Promise<'allowed-once' | 'cancelled' | 'unavailable' | string>;
+/** Harness `tools/pre-execute` 的决策结果。 */
+type SqlPreToolDecision = {
+    kind: 'allow';
+} | {
+    kind: 'deny';
+    reason: string;
+} | {
+    kind: 'ask';
+    reason?: string;
+};
+/** 审批策略需要读取的 alpha.4 工具执行字段。 */
+interface SqlToolExecution {
+    readonly name: string;
+    readonly arguments: unknown;
 }
+/** Harness `tools/pre-execute` waterfall 监听器。 */
+type SqlPreExecuteListener = (exec: SqlToolExecution, next: () => Promise<SqlPreToolDecision>) => Promise<SqlPreToolDecision>;
 /** 插件所需的最小 ctx 面。 */
 export interface SqlPluginContext {
     tools: {
-        register(definition: SqlToolDefinition, options?: {
-            prepend?: boolean;
-        }): () => void;
+        register(definition: SqlToolDefinition): () => void;
     };
-    get?(name: 'approval'): SqlApproval | undefined;
-    on?(event: string, listener: () => void): () => void;
+    on(event: 'tools/pre-execute', listener: SqlPreExecuteListener): () => void;
+    on(event: 'dispose', listener: () => void): () => void;
 }
 /**
  * 插件入口：解析配置、构建四工具、给 sql_exec 注入审批门。

@@ -2,22 +2,18 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { apply, inject } from '../lib/index.js'
 
-function makeFakeCtx(approval) {
+function makeFakeCtx() {
   const registered = []
   const listeners = {}
   const ctx = {
     tools: {
-      register(definition, options) {
-        registered.push({ definition, options })
+      register(definition, ...extra) {
+        registered.push({ definition, extra })
         return () => {
           const index = registered.findIndex((item) => item.definition === definition)
           if (index >= 0) registered.splice(index, 1)
         }
       },
-    },
-    get(name) {
-      if (name === 'approval') return approval
-      return undefined
     },
     on(event, listener) {
       (listeners[event] ??= []).push(listener)
@@ -31,47 +27,43 @@ test('inject 声明 tools', () => {
   assert.deepEqual(inject, ['tools'])
 })
 
-test('apply 注册 6 个工具（prepend 审批门）', () => {
-  const { ctx, registered } = makeFakeCtx({ request: async () => 'allowed-once' })
+test('apply 注册 6 个工具（官方 register 签名）', () => {
+  const { ctx, registered } = makeFakeCtx()
   apply(ctx, {})
   assert.equal(registered.length, 6)
-  assert.equal(registered[0].options.prepend, true)
+  assert.ok(registered.every((item) => item.extra.length === 0))
+  assert.ok(registered.every((item) => !Object.hasOwn(item.definition, 'gate')))
 })
 
-test('审批门：allowed-once 放行；拒绝时返回 deny 原因', async () => {
-  const { ctx, registered } = makeFakeCtx({ request: async () => 'allowed-once' })
+test('sql_exec 通过 tools/pre-execute 返回 ask，其他工具继续 waterfall', async () => {
+  const { ctx, listeners } = makeFakeCtx()
   apply(ctx, {})
-  const execTool = registered.find((item) => item.definition.name === 'sql_exec').definition
-  const result = await execTool.gate({ args: { sql: 'DELETE FROM x' } }, async () => 'EXECUTED')
-  assert.equal(result, 'EXECUTED')
+  const preExecute = listeners['tools/pre-execute'][0]
+  let delegated = false
+  const ask = await preExecute(
+    { name: 'sql_exec', arguments: { sql: 'DELETE FROM users' } },
+    async () => { delegated = true; return { kind: 'allow' } },
+  )
+  assert.equal(ask.kind, 'ask')
+  assert.ok(ask.reason.includes('DELETE FROM users'))
+  assert.equal(delegated, false)
 
-  const { ctx: ctx2, registered: reg2 } = makeFakeCtx({ request: async () => 'rejected' })
-  apply(ctx2, {})
-  const execTool2 = reg2.find((item) => item.definition.name === 'sql_exec').definition
-  const denied = await execTool2.gate({ args: { sql: 'DELETE FROM x' } }, async () => 'EXECUTED')
-  assert.equal(denied.kind, 'deny')
-  assert.ok(denied.reason.includes('未获批准'))
+  const allowed = await preExecute(
+    { name: 'sql_query', arguments: { sql: 'SELECT 1' } },
+    async () => { delegated = true; return { kind: 'allow' } },
+  )
+  assert.deepEqual(allowed, { kind: 'allow' })
+  assert.equal(delegated, true)
 })
 
-test('无审批通道时 deny 并给出指引', async () => {
-  const { ctx, registered } = makeFakeCtx(undefined)
-  apply(ctx, {})
-  const execTool = registered.find((item) => item.definition.name === 'sql_exec').definition
-  const denied = await execTool.gate({ args: { sql: 'x' } }, async () => 'EXECUTED')
-  assert.equal(denied.kind, 'deny')
-  assert.ok(denied.reason.includes('writeApproval'))
-})
-
-test('writeApproval=false 时不注入审批门', async () => {
-  const { ctx, registered } = makeFakeCtx(undefined)
+test('writeApproval=false 时不注册 pre-execute 审批策略', () => {
+  const { ctx, listeners } = makeFakeCtx()
   apply(ctx, { writeApproval: false })
-  const execTool = registered.find((item) => item.definition.name === 'sql_exec').definition
-  const result = await execTool.gate({ args: { sql: 'x' } }, async () => 'EXECUTED')
-  assert.equal(result, 'EXECUTED')
+  assert.equal(listeners['tools/pre-execute'], undefined)
 })
 
 test('dispose 卸载全部工具', () => {
-  const { ctx, registered, listeners } = makeFakeCtx({ request: async () => 'allowed-once' })
+  const { ctx, registered, listeners } = makeFakeCtx()
   apply(ctx, {})
   assert.equal(registered.length, 6)
   for (const listener of listeners.dispose ?? []) listener()

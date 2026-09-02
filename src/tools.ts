@@ -22,7 +22,6 @@ export interface SqlToolDefinition {
     render(args: unknown, value: unknown): ContentBlock[]
   }
   execute(args: unknown, exec: unknown): Promise<unknown>
-  gate?(exec: unknown, next: () => Promise<unknown>): Promise<unknown>
   timeoutMs?: number
 }
 
@@ -431,9 +430,6 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
       const { adapter, name } = getAdapter(optionalString(args, 'connection'))
       const changes = await adapter.exec(sql)
       return { connection: name, changes, readOnly: false }
-    },
-    gate(exec: unknown, next: () => Promise<unknown>): Promise<unknown> {
-      return next() // 审批门由 index.ts 注入（需要宿主 ctx）
     },
     timeoutMs: cfg.execTimeoutMs,
   }

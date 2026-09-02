@@ -24,7 +24,6 @@ export interface SqlToolDefinition {
         render(args: unknown, value: unknown): ContentBlock[];
     };
     execute(args: unknown, exec: unknown): Promise<unknown>;
-    gate?(exec: unknown, next: () => Promise<unknown>): Promise<unknown>;
     timeoutMs?: number;
 }
 /** 校验只读查询：词法去噪后白名单开头 + 写关键字扫描 + 单语句。 */
