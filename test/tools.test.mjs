@@ -81,6 +81,15 @@ test('execute 返回值可 JSON 序列化', async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(value)), value)
 })
 
+test('工具执行把 exec.signal 传入数据库适配器', async () => {
+  const controller = new AbortController()
+  controller.abort(new Error('cancel sql tool'))
+  await assert.rejects(
+    () => query.execute({ sql: 'SELECT 1' }, { signal: controller.signal }),
+    /cancel sql tool/,
+  )
+})
+
 test('assertReadQuery 不误伤字符串/注释里的分号与写关键字', () => {
   assert.equal(assertReadQuery("SELECT 'delete;' AS label"), "SELECT 'delete;' AS label")
   assert.equal(assertReadQuery('SELECT 1 -- 注释里的 update\n'), 'SELECT 1 -- 注释里的 update')
@@ -93,6 +102,13 @@ test('assertReadQuery 拒绝 data-modifying CTE / INTO OUTFILE / 行锁 / PRAGMA
   assert.throws(() => assertReadQuery("SELECT * FROM t INTO OUTFILE '/tmp/x'"), /INTO/)
   assert.throws(() => assertReadQuery('SELECT * FROM t FOR UPDATE'), /FOR UPDATE/)
   assert.throws(() => assertReadQuery('PRAGMA journal_mode = WAL'), /PRAGMA 写操作/)
+})
+
+test('assertReadQuery 连续调用始终拒绝同一 data-modifying CTE', () => {
+  const sql = 'WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone'
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    assert.throws(() => assertReadQuery(sql), /DELETE/)
+  }
 })
 
 test('assertReadQuery 放行 SHOW CREATE TABLE 等元数据语句', () => {

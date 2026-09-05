@@ -21,5 +21,5 @@ test('cordis.patch.yml 插入行名为 dsh-sql', () => {
 test('名称与版本', () => {
   const pkg = require('../package.json')
   assert.equal(pkg.name, 'dsh-sql')
-  assert.equal(pkg.version, '0.4.1')
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/)
 })

@@ -9,7 +9,7 @@ import mysql from 'mysql2/promise'
 import pg from 'pg'
 import { assertIdentifier, type SqlConnectionConfig } from './config.js'
 
-/** 查询结果：列名 + 行（值数组，损失 JSON 友好）。 */
+/** 查询结果：列名 + 行（值数组，无损 JSON 友好）。 */
 export interface QueryResult {
   columns: string[]
   rows: unknown[][]
@@ -26,16 +26,28 @@ export interface ColumnInfo {
 /** 统一适配器接口。 */
 export interface DatabaseAdapter {
   engine: 'sqlite' | 'mysql' | 'postgres'
-  listTables(): Promise<string[]>
-  describeTable(table: string): Promise<ColumnInfo[]>
-  query(sql: string, limit?: number): Promise<QueryResult>
-  exec(sql: string): Promise<number>
-  ping(): Promise<void>
+  listTables(signal?: AbortSignal): Promise<string[]>
+  describeTable(table: string, signal?: AbortSignal): Promise<ColumnInfo[]>
+  query(sql: string, limit?: number, signal?: AbortSignal): Promise<QueryResult>
+  exec(sql: string, signal?: AbortSignal): Promise<number>
+  ping(signal?: AbortSignal): Promise<void>
   close(): Promise<void>
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  if (signal.reason !== undefined) return signal.reason
+  const error = new Error('The operation was aborted.')
+  error.name = 'AbortError'
+  return error
+}
+
 function toValue(value: unknown): unknown {
-  if (typeof value === 'bigint') return Number(value)
+  if (typeof value === 'bigint') {
+    if (value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      return Number(value)
+    }
+    return value.toString()
+  }
   if (value instanceof Date) return value.toISOString()
   if (value instanceof Uint8Array) return Array.from(value)
   if (value instanceof Map) return Object.fromEntries(value)
@@ -52,6 +64,77 @@ function quoteSqliteIdentifier(name: string): string {
   return '"' + name.replace(/"/g, '""') + '"'
 }
 
+function streamMysqlQuery(corePool: { query(querySql: string): any }, sql: string, limit: number, discard: () => void): Promise<QueryResult> {
+  return new Promise<QueryResult>((resolve, reject) => {
+    let settled = false
+    let columns: string[] = []
+    const rows: unknown[][] = []
+    const stream = corePool.query(sql).stream({ highWaterMark: 64 })
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      resolve({ columns, rows })
+    }
+    stream.on('fields', (fields: Array<{ name: string }>) => {
+      columns = fields.map((field) => field.name)
+    })
+    // Consume the Readable, otherwise mysql2 pauses forever at highWaterMark.
+    stream.on('data', (row: Record<string, unknown>) => {
+      if (settled) return
+      if (columns.length === 0) columns = Object.keys(row)
+      rows.push(columns.map((name) => toValue(row[name])))
+      if (rows.length >= limit) {
+        finish()
+        stream.destroy()
+        // mysql2 resumes its connection when only the Readable is destroyed.
+        discard()
+      }
+    })
+    stream.on('end', finish)
+    stream.on('close', finish)
+    stream.on('error', (error: unknown) => {
+      if (settled) return
+      settled = true
+      reject(error instanceof Error ? error : new Error(String(error)))
+    })
+  })
+}
+
+/** pg's `rows` option is a page size; row events avoid its full result accumulator. */
+function streamPostgresQuery(client: pg.PoolClient, sql: string, limit: number, discard: () => void): Promise<QueryResult> {
+  return new Promise<QueryResult>((resolve, reject) => {
+    let settled = false
+    let columns: string[] = []
+    const rows: unknown[][] = []
+    const query = new pg.Query<Record<string, unknown>>(sql)
+    query.on('row', (row, result) => {
+      if (settled) return
+      if (columns.length === 0) columns = result?.fields.map((field) => field.name) ?? Object.keys(row)
+      rows.push(columns.map((name) => toValue(row[name])))
+      if (rows.length >= limit) {
+        // Closing this dedicated connection stops server work and prevents reuse.
+        settled = true
+        discard()
+        resolve({ columns, rows })
+      }
+    })
+    query.on('end', (result) => {
+      if (settled) return
+      settled = true
+      if (columns.length === 0) columns = result.fields.map((field) => field.name)
+      resolve({ columns, rows })
+    })
+    // Keep this listener after reaching the cap: destroying the client can emit
+    // the driver's asynchronous connection-closed error on this active query.
+    query.on('error', (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
+    client.query(query)
+  })
+}
+
 /** SQLite 适配器（node:sqlite，零依赖）。 */
 class SqliteAdapter implements DatabaseAdapter {
   engine = 'sqlite' as const
@@ -60,13 +143,17 @@ class SqliteAdapter implements DatabaseAdapter {
     this.db = new DatabaseSync(file === ':memory:' ? ':memory:' : file)
     this.db.exec('PRAGMA busy_timeout = 5000')
   }
-  async listTables() {
+  async listTables(signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const result = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<Record<string, unknown>>
+    signal?.throwIfAborted()
     return result.map((row) => String(row.name))
   }
-  async describeTable(table: string) {
+  async describeTable(table: string, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const name = assertIdentifier(table, '表名')
     const rows = this.db.prepare('PRAGMA table_info(' + quoteSqliteIdentifier(name) + ')').all() as Array<Record<string, unknown>>
+    signal?.throwIfAborted()
     return rows.map((row) => ({
       name: String(row.name),
       type: String(row.type ?? ''),
@@ -74,10 +161,12 @@ class SqliteAdapter implements DatabaseAdapter {
       primaryKey: Number(row.pk) === 1,
     }))
   }
-  async query(sql: string, limit?: number) {
+  async query(sql: string, limit?: number, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const statement = this.db.prepare(sql)
     if (limit === undefined || limit <= 0) {
       const rows = statement.all() as Array<Record<string, unknown>>
+      signal?.throwIfAborted()
       return rowsToColumns(rows)
     }
     const columns = statement.columns().map((column) => column.name)
@@ -85,21 +174,27 @@ class SqliteAdapter implements DatabaseAdapter {
     for (const raw of statement.iterate()) {
       const row = raw as Record<string, unknown>
       rows.push(columns.map((name) => toValue(row[name])))
+      signal?.throwIfAborted()
       if (rows.length >= limit) break
     }
     return { columns, rows }
   }
-  async exec(sql: string) {
+  async exec(sql: string, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const single = sql.replace(/;\s*$/, '').trim()
     if (single.includes(';')) {
       this.db.exec(sql)
+      signal?.throwIfAborted()
       return 0
     }
     const result = this.db.prepare(single).run()
+    signal?.throwIfAborted()
     return Number(result.changes)
   }
-  async ping() {
+  async ping(signal?: AbortSignal) {
+    signal?.throwIfAborted()
     this.db.prepare('SELECT 1').get()
+    signal?.throwIfAborted()
   }
   async close() {
     this.db.close()
@@ -121,13 +216,41 @@ class MysqlAdapter implements DatabaseAdapter {
       enableKeepAlive: true,
     })
   }
-  async listTables() {
-    const [rows] = await this.pool.query('SHOW TABLES') as unknown as [Array<Record<string, unknown>>, unknown]
+  private async withSignalConnection<T>(signal: AbortSignal | undefined, work: (connection: mysql.PoolConnection, discard: () => void) => Promise<T>): Promise<T> {
+    signal?.throwIfAborted()
+    const connection = await this.pool.getConnection()
+    let destroyed = false
+    let rejectAbort: (reason: unknown) => void = () => {}
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
+    const discard = (): void => {
+      if (destroyed) return
+      destroyed = true
+      connection.destroy()
+    }
+    const onAbort = (): void => {
+      discard()
+      rejectAbort(abortReason(signal!))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      signal?.throwIfAborted()
+      return await Promise.race([work(connection, discard), aborted])
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
+      if (!destroyed) connection.release()
+    }
+  }
+  private async queryRows(sql: string, signal?: AbortSignal): Promise<any> {
+    if (signal === undefined) return await this.pool.query(sql)
+    return await this.withSignalConnection(signal, async (connection) => await connection.query(sql))
+  }
+  async listTables(signal?: AbortSignal) {
+    const [rows] = await this.queryRows('SHOW TABLES', signal) as unknown as [Array<Record<string, unknown>>, unknown]
     return rows.map((row) => String(Object.values(row)[0] ?? ''))
   }
-  async describeTable(table: string) {
+  async describeTable(table: string, signal?: AbortSignal) {
     const name = assertIdentifier(table, '表名')
-    const [rows] = await this.pool.query('DESCRIBE `' + name + '`') as unknown as [Array<Record<string, unknown>>, unknown]
+    const [rows] = await this.queryRows('DESCRIBE `' + name + '`', signal) as unknown as [Array<Record<string, unknown>>, unknown]
     return rows.map((row) => ({
       name: String(row.Field),
       type: String(row.Type ?? ''),
@@ -135,45 +258,22 @@ class MysqlAdapter implements DatabaseAdapter {
       primaryKey: String(row.Key ?? '').toUpperCase() === 'PRI',
     }))
   }
-  async query(sql: string, limit?: number) {
+  async query(sql: string, limit?: number, signal?: AbortSignal) {
     if (limit === undefined || limit <= 0) {
-      const [rows] = await this.pool.query(sql) as unknown as [Array<Record<string, unknown>>, unknown]
+      const [rows] = await this.queryRows(sql, signal) as unknown as [Array<Record<string, unknown>>, unknown]
       return rowsToColumns(rows)
     }
-    const corePool = (this.pool as unknown as { pool: { query(querySql: string): any } }).pool
-    return await new Promise<QueryResult>((resolve, reject) => {
-      let settled = false
-      let columns: string[] = []
-      const rows: unknown[][] = []
-      const stream = corePool.query(sql).stream({ highWaterMark: 64 })
-      const finish = (): void => {
-        if (settled) return
-        settled = true
-        resolve({ columns, rows })
-      }
-      stream.on('fields', (fields: Array<{ name: string }>) => {
-        columns = fields.map((field) => field.name)
-      })
-      stream.on('result', (row: Record<string, unknown>) => {
-        if (columns.length === 0) columns = Object.keys(row)
-        rows.push(columns.map((name) => toValue(row[name])))
-        if (rows.length >= limit) stream.destroy()
-      })
-      stream.on('end', finish)
-      stream.on('close', finish)
-      stream.on('error', (error: unknown) => {
-        if (settled) return
-        settled = true
-        reject(error instanceof Error ? error : new Error(String(error)))
-      })
+    return await this.withSignalConnection(signal, async (connection, discard) => {
+      const coreConnection = (connection as unknown as { connection: { query(querySql: string): any } }).connection
+      return await streamMysqlQuery(coreConnection, sql, limit, discard)
     })
   }
-  async exec(sql: string) {
-    const [result] = await this.pool.query(sql) as unknown as [{ affectedRows?: number }, unknown]
+  async exec(sql: string, signal?: AbortSignal) {
+    const [result] = await this.queryRows(sql, signal) as unknown as [{ affectedRows?: number }, unknown]
     return Number(result?.affectedRows ?? 0)
   }
-  async ping() {
-    await this.pool.query('SELECT 1')
+  async ping(signal?: AbortSignal) {
+    await this.queryRows('SELECT 1', signal)
   }
   async close() {
     await this.pool.end()
@@ -194,13 +294,44 @@ class PostgresAdapter implements DatabaseAdapter {
       max: 5,
     })
   }
-  async listTables() {
-    const result = await this.pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name")
+  private async withSignalClient<T>(signal: AbortSignal | undefined, work: (client: pg.PoolClient, discard: () => void) => Promise<T>): Promise<T> {
+    signal?.throwIfAborted()
+    const client = await this.pool.connect()
+    let destroyed = false
+    let rejectAbort: (reason: unknown) => void = () => {}
+    const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
+    const discard = (): void => {
+      if (destroyed) return
+      destroyed = true
+      client.release(true)
+    }
+    const onAbort = (): void => {
+      discard()
+      rejectAbort(abortReason(signal!))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      signal?.throwIfAborted()
+      return await Promise.race([work(client, discard), aborted])
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
+      if (!destroyed) client.release()
+    }
+  }
+  private async queryWithSignal(query: any, values: unknown[] | undefined, signal?: AbortSignal): Promise<any> {
+    const run = async (client: { query(query: any, values?: unknown[]): Promise<any> }): Promise<any> => {
+      return values === undefined ? await client.query(query) : await client.query(query, values)
+    }
+    if (signal === undefined) return await run(this.pool)
+    return await this.withSignalClient(signal, run)
+  }
+  async listTables(signal?: AbortSignal) {
+    const result = await this.queryWithSignal("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name", undefined, signal)
     return result.rows.map((row: Record<string, unknown>) => String(row.table_name))
   }
-  async describeTable(table: string) {
+  async describeTable(table: string, signal?: AbortSignal) {
     const name = assertIdentifier(table, '表名')
-    const result = await this.pool.query(
+    const result = await this.queryWithSignal(
       `SELECT c.column_name, c.data_type, c.is_nullable,
               EXISTS (
                 SELECT 1
@@ -218,6 +349,7 @@ class PostgresAdapter implements DatabaseAdapter {
           AND c.table_name = $1
         ORDER BY c.ordinal_position`,
       [name],
+      signal,
     )
     return result.rows.map((row: Record<string, unknown>) => ({
       name: String(row.column_name),
@@ -226,22 +358,22 @@ class PostgresAdapter implements DatabaseAdapter {
       primaryKey: row.is_primary === true,
     }))
   }
-  async query(sql: string, limit?: number) {
+  async query(sql: string, limit?: number, signal?: AbortSignal) {
     if (limit === undefined || limit <= 0) {
-      const result = await this.pool.query(sql)
+      const result = await this.queryWithSignal(sql, undefined, signal)
       const rows = result.rows as Array<Record<string, unknown>>
       return rowsToColumns(rows)
     }
-    const result = await this.pool.query({ text: sql, values: [], rows: limit } as any)
-    const rows = result.rows as Array<Record<string, unknown>>
-    return rowsToColumns(rows)
+    return await this.withSignalClient(signal, async (client, discard) => {
+      return await streamPostgresQuery(client, sql, limit, discard)
+    })
   }
-  async exec(sql: string) {
-    const result = await this.pool.query(sql)
+  async exec(sql: string, signal?: AbortSignal) {
+    const result = await this.queryWithSignal(sql, undefined, signal)
     return Number(result.rowCount ?? 0)
   }
-  async ping() {
-    await this.pool.query('SELECT 1')
+  async ping(signal?: AbortSignal) {
+    await this.queryWithSignal('SELECT 1', undefined, signal)
   }
   async close() {
     await this.pool.end()

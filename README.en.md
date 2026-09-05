@@ -4,7 +4,7 @@
 
 > **Your agent can query databases now**: SQLite / MySQL / PostgreSQL engines, read-only whitelist + write approval gate.
 
-DSH (DeepSeek Harness) engineer-grade database plugin: four tools covering connection management, read-only queries, write operations, and schema introspection.
+DSH (DeepSeek Harness) engineer-grade database plugin: six tools covering connection management, read-only queries, write operations, schema introspection, database statistics, and health checks.
 
 ![npm version](https://img.shields.io/npm/v/dsh-sql?label=npm&color=blue) ![npm downloads](https://img.shields.io/npm/dm/dsh-sql) ![license](https://img.shields.io/npm/l/dsh-sql) ![stars](https://img.shields.io/github/stars/STARDUSTLC666/dsh-sql?style=social)
 
@@ -12,7 +12,7 @@ DSH (DeepSeek Harness) engineer-grade database plugin: four tools covering conne
 
 ## Compatibility
 
-Verified against source-run `@deepseek-ai/dsh@0.1.2-alpha.4` on 2026-09-02. Built for the cordis patch-bundle plugin model (`cordis.patch.yml` + `dsh.bundle.patch`). No runtime imports of `@deepseek-ai/*` internals.
+Verified against the official `@deepseek-ai/dsh@0.1.2-rc.1` release and current source checkout on 2026-09-04. `0.1.2-alpha.5` remains supported because both releases use the same plugin/tool contract. Built for the cordis patch-bundle model (`cordis.patch.yml` + `dsh.bundle.patch`) with no runtime imports of `@deepseek-ai/*` internals.
 
 ## Installation
 
@@ -57,6 +57,8 @@ Then restart the web service. To clean up fully, also remove the plugin entry fr
     writeApproval: true               # approve write operations first (default true)
 ```
 
+With no connection configuration, the plugin provides a `:memory:` SQLite connection. If configuration is present but invalid, the plugin fails to load with the validation error instead of silently falling back to the in-memory database.
+
 ## Tools
 
 | Tool | Purpose | Safety |
@@ -65,6 +67,8 @@ Then restart the web service. To clean up fully, also remove the plugin entry fr
 | `sql_query` | Read-only queries (SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH) | Keyword whitelist + rejects multi-statement |
 | `sql_exec` | Writes / DDL (multi-statement scripts allowed) | readOnly lock + approval gate |
 | `sql_schema` | Table list / table structure | Identifier whitelist validation |
+| `sql_stats` | Table counts, row estimates, and database size | Quoted identifiers + isolated query failures |
+| `sql_health` | Connection and safety-configuration checks | Per-connection probe; passwords are never returned |
 
 ### Examples
 
@@ -72,6 +76,8 @@ Then restart the web service. To clean up fully, also remove the plugin entry fr
 sql_list {}
 sql_schema {}                                  # list all tables
 sql_schema { table: users }                    # inspect the users table
+sql_stats {}                                   # inspect the default connection's data size
+sql_health {}                                  # check connections and safety settings
 sql_query { sql: SELECT * FROM orders WHERE status = 'pending' LIMIT 50 }
 sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 ```
@@ -81,7 +87,9 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 - **Lexer-grade read-only guard**: sql_query strips strings/comments before validation, then rejects data-modifying CTEs (WITH…DELETE/UPDATE), SELECT INTO, FOR UPDATE/FOR SHARE, PRAGMA assignment, and multi-statement input
 - **Write approval gate**: sql_exec asks for approval by default (mirroring dsh-email's send approval); headless environments without an approval channel are denied
 - **readOnly mode**: lock out writes entirely for production databases
-- **Streaming row cap**: SQLite iterator / MySQL stream / PostgreSQL portal all stop at maxRows+1, so large queries are never fully materialized; overflow is flagged with truncated
+- **Streaming row cap**: SQLite iterators, MySQL Readables, and PostgreSQL Query row events collect at most maxRows+1 rows and flag overflow with truncated. MySQL and PostgreSQL close the query's dedicated connection at the cap; smaller results return the connection to the pool, without materializing the full result in memory
+- **Cancellation-aware execution**: queries and writes observe Harness `exec.signal`; cancellation stops waiting and destroys the active dedicated MySQL/PostgreSQL connection
+- **Lossless large integers**: bigint values within JavaScript's safe integer range are returned as numbers; larger values are returned as decimal strings instead of silently losing precision
 - **Identifier validation**: table names restricted to alphanumerics and underscores — no schema injection
 - **Secrets stay out of config**: passwords via `DSH_SQL_PASSWORD_<CONNECTION>` env vars
 
@@ -95,7 +103,7 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ```bash
 pnpm install
-pnpm test       # build + 35 tests, including a real SQLite integration suite
+pnpm test       # build + full test suite, including a real SQLite integration suite
 ```
 
 ## License

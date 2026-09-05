@@ -4,7 +4,7 @@
 
 > **你的 agent 会查库了**：SQLite / MySQL / PostgreSQL 三引擎，只读白名单 + 写审批门。
 
-DSH（DeepSeek Harness）工程师级数据库插件：四个工具覆盖连接管理、只读查询、写操作与结构探查。
+DSH（DeepSeek Harness）工程师级数据库插件：六个工具覆盖连接管理、只读查询、写操作、结构探查、统计概览与健康自检。
 
 ![npm version](https://img.shields.io/npm/v/dsh-sql?label=npm&color=blue) ![npm downloads](https://img.shields.io/npm/dm/dsh-sql) ![license](https://img.shields.io/npm/l/dsh-sql) ![stars](https://img.shields.io/github/stars/STARDUSTLC666/dsh-sql?style=social)
 
@@ -12,7 +12,7 @@ DSH（DeepSeek Harness）工程师级数据库插件：四个工具覆盖连接�
 
 ## 兼容性
 
-在 `@deepseek-ai/dsh@0.1.2-alpha.4` 源码模式下验证（2026-09-02）。遵循 cordis 组合包补丁模型（`cordis.patch.yml` + `dsh.bundle.patch`），运行时不 import 任何 `@deepseek-ai/*` 内部模块。
+已在官方 `@deepseek-ai/dsh@0.1.2-rc.1` 与最新源码模式下验证（2026-09-04）；`0.1.2-alpha.5` 仍可使用，两版插件/工具契约一致。遵循 cordis 组合包补丁模型（`cordis.patch.yml` + `dsh.bundle.patch`），运行时不 import 任何 `@deepseek-ai/*` 内部模块。
 
 ## 安装
 
@@ -57,6 +57,8 @@ dsh plugin --profile web remove dsh-sql
     writeApproval: true               # 写操作先弹审批（默认 true）
 ```
 
+配置缺省时会提供一个 `:memory:` SQLite 连接；配置一旦给出但格式无效，插件会直接报错并停止加载，不会静默回退到内存库。
+
 ## 工具一览
 
 | 工具 | 作用 | 安全 |
@@ -65,6 +67,8 @@ dsh plugin --profile web remove dsh-sql
 | `sql_query` | 只读查询（SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH）| 关键字白名单 + 拒绝多语句 |
 | `sql_exec` | 写操作/DDL（可多语句脚本）| readOnly 禁用 + 审批门 |
 | `sql_schema` | 表清单 / 表结构 | 标识符白名单校验 |
+| `sql_stats` | 表数量、行数与库体积概览 | 表名引用 + 查询失败隔离 |
+| `sql_health` | 连接与安全配置自检 | 逐连接探活，不回显密码 |
 
 ### 示例
 
@@ -72,6 +76,8 @@ dsh plugin --profile web remove dsh-sql
 sql_list {}
 sql_schema {}                                  # 列出所有表
 sql_schema { table: users }                    # 看 users 表结构
+sql_stats {}                                   # 查看默认连接的数据规模
+sql_health {}                                  # 检查连接和安全配置
 sql_query { sql: SELECT * FROM orders WHERE status = 'pending' LIMIT 50 }
 sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 ```
@@ -81,7 +87,9 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 - **词法级只读保护**：sql_query 先剥离字符串/注释再校验，拒绝 data-modifying CTE（WITH…DELETE/UPDATE）、SELECT INTO、FOR UPDATE/FOR SHARE、PRAGMA 赋值与多语句
 - **写审批门**：sql_exec 默认弹审批（对齐 dsh-email 的发信审批），headless 环境无审批通道时拒绝执行
 - **readOnly 模式**：生产库可整体禁用写
-- **流式行数钳制**：SQLite 迭代器 / MySQL stream / PostgreSQL portal 都按 maxRows+1 停表，大查询不会全量载入内存，超量标记 truncated
+- **流式行数钳制**：SQLite 迭代器 / MySQL Readable / PostgreSQL Query 行事件最多收集 maxRows+1 行，超量标记 truncated；MySQL 和 PostgreSQL 在达到上限时关闭该查询的专用连接，未达上限则正常归还连接池，避免全量结果驻留内存
+- **可取消执行**：查询与写操作遵守 Harness 的 `exec.signal`；取消时会中止等待并销毁正在工作的 MySQL/PostgreSQL 专用连接
+- **大整数无损**：数据库返回的 bigint 在 JavaScript 安全整数范围内输出 number，超出范围则输出十进制字符串，避免静默丢精度
 - **标识符校验**：表名只允许字母/数字/下划线，杜绝 schema 注入
 - **密钥不落配置**：密码支持 `DSH_SQL_PASSWORD_<连接名>` 环境变量
 
@@ -95,7 +103,7 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ```bash
 pnpm install
-pnpm test       # 构建 + 35 个测试（含真实 SQLite 集成）
+pnpm test       # 构建 + 完整测试套件（含真实 SQLite 集成）
 ```
 
 ## License

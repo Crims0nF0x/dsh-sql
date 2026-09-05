@@ -1,8 +1,9 @@
 /**
  * dsh-sql —— 工程师级数据库工具插件（node 半身，配置走 cordis.patch.yml）。
  *
- * 插件导出 apply(ctx, config)：注册四个面向模型的工具（sql_list / sql_query /
- * sql_exec / sql_schema），支持 SQLite / MySQL / PostgreSQL 三引擎与多连接。
+ * 插件导出 apply(ctx, config)：注册六个面向模型的工具（sql_list / sql_query /
+ * sql_exec / sql_schema / sql_stats / sql_health），支持 SQLite / MySQL / PostgreSQL
+ * 三引擎与多连接。
  * sql_exec 默认走宿主审批门（对齐 dsh-email 的发信审批），readOnly 模式可整体禁用写。
  *
  * @module dsh-sql
@@ -21,7 +22,7 @@ type SqlPreToolDecision =
   | { kind: 'deny'; reason: string }
   | { kind: 'ask'; reason?: string }
 
-/** 审批策略需要读取的 alpha.4 工具执行字段。 */
+/** 审批策略需要读取的 alpha.5 工具执行字段。 */
 interface SqlToolExecution {
   readonly name: string
   readonly arguments: unknown
@@ -41,16 +42,10 @@ export interface SqlPluginContext {
 }
 
 /**
- * 插件入口：解析配置、构建四工具、给 sql_exec 注入审批门。
+ * 插件入口：解析配置、构建六工具、给 sql_exec 注入审批门。
  */
 export function apply(ctx: SqlPluginContext, config?: SqlConfig | null): void {
-  let cfg
-  try {
-    cfg = resolveConfig(config)
-  } catch (error) {
-    console.warn('[dsh-sql] ' + (error instanceof Error ? error.message : String(error)))
-    cfg = resolveConfig(null)
-  }
+  const cfg = resolveConfig(config)
 
   const { tools, adapters } = buildSqlTools(cfg)
   if (cfg.writeApproval) {

@@ -53,6 +53,12 @@ function requiredString(args: Record<string, unknown>, key: string, label: strin
   return value
 }
 
+function executionSignal(exec: unknown): AbortSignal | undefined {
+  if (typeof exec !== 'object' || exec === null) return undefined
+  const signal = (exec as { signal?: unknown }).signal
+  return signal instanceof AbortSignal ? signal : undefined
+}
+
 /** 只读语句关键字白名单。 */
 const READ_KEYWORDS = /^(select|pragma|explain|show|describe|desc|with)\b/i
 
@@ -129,7 +135,7 @@ function stripSqlNoise(sql: string): string {
 }
 
 /** 写操作关键字：出在 SELECT/EXPLAIN/WITH 语句里即拒绝。 */
-const WRITE_KEYWORDS = /\b(insert|update|delete|replace|merge|drop|alter|create|truncate|call|execute|copy|grant|revoke|attach|detach|vacuum|reindex|refresh|set|reset|begin|commit|rollback|savepoint|release|analyze|load_extension)\b/gi
+const WRITE_KEYWORDS = /\b(insert|update|delete|replace|merge|drop|alter|create|truncate|call|execute|copy|grant|revoke|attach|detach|vacuum|reindex|refresh|set|reset|begin|commit|rollback|savepoint|release|analyze|load_extension)\b/i
 
 /** 校验只读查询：词法去噪后白名单开头 + 写关键字扫描 + 单语句。 */
 export function assertReadQuery(sql: string): string {
@@ -243,17 +249,17 @@ function formatBytes(bytes: number): string {
 }
 
 /** 库体积：SQLite 用页数×页大小；MySQL/PostgreSQL 走系统函数；失败抛错由调用方兜底。 */
-async function databaseSize(adapter: DatabaseAdapter, engine: string): Promise<number> {
+async function databaseSize(adapter: DatabaseAdapter, engine: string, signal?: AbortSignal): Promise<number> {
   if (engine === 'sqlite') {
-    const pageCount = await adapter.query('PRAGMA page_count', 1)
-    const pageSize = await adapter.query('PRAGMA page_size', 1)
+    const pageCount = await adapter.query('PRAGMA page_count', 1, signal)
+    const pageSize = await adapter.query('PRAGMA page_size', 1, signal)
     return Number(pageCount.rows[0]?.[0] ?? 0) * Number(pageSize.rows[0]?.[0] ?? 0)
   }
   if (engine === 'mysql') {
-    const result = await adapter.query('SELECT SUM(DATA_LENGTH + INDEX_LENGTH) FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()', 1)
+    const result = await adapter.query('SELECT SUM(DATA_LENGTH + INDEX_LENGTH) FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()', 1, signal)
     return Number(result.rows[0]?.[0] ?? -1)
   }
-  const result = await adapter.query('SELECT pg_database_size(current_database())', 1)
+  const result = await adapter.query('SELECT pg_database_size(current_database())', 1, signal)
   return Number(result.rows[0]?.[0] ?? -1)
 }
 
@@ -292,7 +298,7 @@ export interface SqlExecGateContext {
   signal?: unknown
 }
 
-/** 构建四个工具定义；adapters 惰性创建并按连接名缓存。 */
+/** 构建六个工具定义；adapters 惰性创建并按连接名缓存。 */
 export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefinition[]; adapters: Map<string, DatabaseAdapter> } {
   const cfg = config
   const adapters = new Map<string, DatabaseAdapter>()
@@ -311,7 +317,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
     return { adapter, name: connection.name }
   }
 
-  const pingAllConnections = async (): Promise<Array<Record<string, unknown>>> => {
+  const pingAllConnections = async (signal?: AbortSignal): Promise<Array<Record<string, unknown>>> => {
     const rows: Array<Record<string, unknown>> = []
     for (const connection of cfg.connections) {
       const entry: Record<string, unknown> = { name: connection.name, engine: connection.engine }
@@ -322,10 +328,11 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
       }
       try {
         const { adapter } = getAdapter(connection.name)
-        await adapter.ping()
+        await adapter.ping(signal)
         entry.ok = true
         entry.error = ''
       } catch (error) {
+        signal?.throwIfAborted()
         entry.ok = false
         entry.error = error instanceof Error ? error.message : String(error)
       }
@@ -352,8 +359,8 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
-    async execute() {
-      return { connections: await pingAllConnections() }
+    async execute(_rawArgs: unknown, exec: unknown) {
+      return { connections: await pingAllConnections(executionSignal(exec)) }
     },
     timeoutMs: 30000,
   }
@@ -383,11 +390,11 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
-    async execute(rawArgs: unknown) {
+    async execute(rawArgs: unknown, exec: unknown) {
       const args = asRecord(rawArgs)
       const sql = assertReadQuery(requiredString(args, 'sql', 'SQL 语句'))
       const { adapter, name } = getAdapter(optionalString(args, 'connection'))
-      const result = await adapter.query(sql, cfg.maxRows + 1)
+      const result = await adapter.query(sql, cfg.maxRows + 1, executionSignal(exec))
       const total = result.rows.length
       const rows = result.rows.slice(0, cfg.maxRows)
       const format = optionalString(args, 'format')?.toLowerCase() ?? 'table'
@@ -423,12 +430,12 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         return [{ type: 'text', text: '执行完成（' + rec.connection + '）：影响 ' + rec.changes + ' 行。' }]
       },
     },
-    async execute(rawArgs: unknown) {
+    async execute(rawArgs: unknown, exec: unknown) {
       if (cfg.readOnly) throw new Error('当前配置 readOnly=true，sql_exec 已被禁用。需要写操作请把插件配置里的 readOnly 改为 false 后重启。')
       const args = asRecord(rawArgs)
       const sql = requiredString(args, 'sql', 'SQL 语句')
       const { adapter, name } = getAdapter(optionalString(args, 'connection'))
-      const changes = await adapter.exec(sql)
+      const changes = await adapter.exec(sql, executionSignal(exec))
       return { connection: name, changes, readOnly: false }
     },
     timeoutMs: cfg.execTimeoutMs,
@@ -458,15 +465,16 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         return [{ type: 'text', text: '共 ' + tables.length + ' 张表：' + tables.join(', ') }]
       },
     },
-    async execute(rawArgs: unknown) {
+    async execute(rawArgs: unknown, exec: unknown) {
       const args = asRecord(rawArgs)
       const { adapter, name } = getAdapter(optionalString(args, 'connection'))
       const table = optionalString(args, 'table')
+      const signal = executionSignal(exec)
       if (table !== undefined) {
-        const columns = await adapter.describeTable(table)
+        const columns = await adapter.describeTable(table, signal)
         return { connection: name, table, columns, tables: [] }
       }
-      const tables = await adapter.listTables()
+      const tables = await adapter.listTables(signal)
       return { connection: name, tables, columns: [] }
     },
     timeoutMs: 30000,
@@ -492,14 +500,16 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
-    async execute(rawArgs: unknown) {
+    async execute(rawArgs: unknown, exec: unknown) {
       const args = asRecord(rawArgs)
       const { adapter, name } = getAdapter(optionalString(args, 'connection'))
       const engine = adapter.engine
+      const signal = executionSignal(exec)
       let sizeBytes = -1
       try {
-        sizeBytes = await databaseSize(adapter, engine)
+        sizeBytes = await databaseSize(adapter, engine, signal)
       } catch {
+        signal?.throwIfAborted()
         sizeBytes = -1
       }
       const tables: Array<Record<string, unknown>> = []
@@ -508,20 +518,22 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
           const sql = engine === 'mysql'
             ? 'SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.tables WHERE TABLE_SCHEMA = DATABASE()'
             : 'SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY relname'
-          const result = await adapter.query(sql)
+          const result = await adapter.query(sql, undefined, signal)
           for (const row of result.rows) {
             tables.push({ name: String(row[0]), rowCount: typeof row[1] === 'number' ? row[1] : Number(row[1] ?? 0) })
           }
         } catch (error) {
+          signal?.throwIfAborted()
           tables.push({ name: '', error: error instanceof Error ? error.message : String(error) })
         }
       } else {
-        const names = await adapter.listTables()
+        const names = await adapter.listTables(signal)
         for (const table of names) {
           try {
-            const result = await adapter.query('SELECT COUNT(*) FROM ' + quoteIdent(engine, table), 1)
+            const result = await adapter.query('SELECT COUNT(*) FROM ' + quoteIdent(engine, table), 1, signal)
             tables.push({ name: table, rowCount: Number(result.rows[0]?.[0] ?? 0) })
           } catch (error) {
+            signal?.throwIfAborted()
             tables.push({ name: table, error: error instanceof Error ? error.message : String(error) })
           }
         }
@@ -552,8 +564,8 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
-    async execute() {
-      const connections = await pingAllConnections()
+    async execute(_rawArgs: unknown, exec: unknown) {
+      const connections = await pingAllConnections(executionSignal(exec))
       const bad = connections.filter((c) => c.ok !== true)
       return {
         ok: bad.length === 0,

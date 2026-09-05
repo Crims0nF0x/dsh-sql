@@ -62,6 +62,16 @@ test('writeApproval=false 时不注册 pre-execute 审批策略', () => {
   assert.equal(listeners['tools/pre-execute'], undefined)
 })
 
+test('apply 遇到非法配置时响亮失败，不回退到内存 SQLite', () => {
+  const { ctx, registered, listeners } = makeFakeCtx()
+  assert.throws(
+    () => apply(ctx, { connections: [{ name: '', engine: 'sqlite' }] }),
+    /需要 name/,
+  )
+  assert.equal(registered.length, 0)
+  assert.deepEqual(listeners, {})
+})
+
 test('dispose 卸载全部工具', () => {
   const { ctx, registered, listeners } = makeFakeCtx()
   apply(ctx, {})
