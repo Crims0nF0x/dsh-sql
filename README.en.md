@@ -12,7 +12,7 @@ DSH (DeepSeek Harness) engineer-grade database plugin: six tools covering connec
 
 ## Compatibility
 
-Verified against the official `@deepseek-ai/dsh@0.1.2-rc.1` release and current source checkout on 2026-09-04. `0.1.2-alpha.5` remains supported because both releases use the same plugin/tool contract. Built for the cordis patch-bundle model (`cordis.patch.yml` + `dsh.bundle.patch`) with no runtime imports of `@deepseek-ai/*` internals.
+Verified with official `@deepseek-ai/dsh@0.1.5-rc.1` and Node `24.16.0` on 2026-09-11: all 18 components load alongside Modlens, with passing tool-schema, skill-registration and offline read-only invocation checks. Uses the `cordis.patch.yml` + `dsh.bundle.patch` bundle model. Node requirements match this Harness release: 22.19 or later within 22.x, or 24 or later. Live external-service workflows require separate configuration and validation.
 
 ## Installation
 

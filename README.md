@@ -12,7 +12,7 @@ DSH（DeepSeek Harness）工程师级数据库插件：六个工具覆盖连接�
 
 ## 兼容性
 
-已在官方 `@deepseek-ai/dsh@0.1.2-rc.1` 与最新源码模式下验证（2026-09-04）；`0.1.2-alpha.5` 仍可使用，两版插件/工具契约一致。遵循 cordis 组合包补丁模型（`cordis.patch.yml` + `dsh.bundle.patch`），运行时不 import 任何 `@deepseek-ai/*` 内部模块。
+已在官方 `@deepseek-ai/dsh@0.1.5-rc.1`、Node `24.16.0` 上验证（2026-09-11）：18 个组件与 Modlens 同载，工具 schema、技能注册及离线只读调用检查通过。采用 `cordis.patch.yml` + `dsh.bundle.patch` 组合包模型。Node 要求与该版本 Harness 一致：22.19 及以上的 22.x，或 24 及以上。外部服务的实际业务操作需按各组件配置单独验证。
 
 ## 安装
 
