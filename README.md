@@ -91,7 +91,7 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 - **readOnly 模式**：生产库可整体禁用写
 - **流式行数钳制**：SQLite 迭代器 / MySQL Readable / PostgreSQL Query 行事件最多收集 maxRows+1 行，超量标记 truncated；MySQL 和 PostgreSQL 在达到上限时关闭该查询的专用连接，未达上限则正常归还连接池，避免全量结果驻留内存
 - **可取消执行**：查询与写操作遵守 Harness 的 `exec.signal`；取消时会中止等待并销毁正在工作的 MySQL/PostgreSQL 专用连接
-- **大整数无损**：数据库返回的 bigint 在 JavaScript 安全整数范围内输出 number，超出范围则输出十进制字符串，避免静默丢精度
+- **大整数无损**：数据库返回的 bigint 在 JavaScript 安全整数范围内输出 number，超出范围则输出十进制字符串，避免静默丢精度。PostgreSQL 侧用查询级 int8 类型解析器覆盖（pg 默认把 `42::bigint` 也返回字符串），MySQL 侧开启 `supportBigNumbers`（默认会把 `9223372036854775807` 静默读成 `9223372036854776000`）—— 两者均在真实 PostgreSQL 16 / MySQL 8.0 上验证
 - **标识符校验**：表名只允许字母/数字/下划线，杜绝 schema 注入
 - **密钥不落配置**：密码支持 `DSH_SQL_PASSWORD_<连接名>` 环境变量
 
@@ -106,6 +106,20 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 ```bash
 pnpm install
 pnpm test       # 构建 + 完整测试套件（含真实 SQLite 集成）
+```
+
+真实 PostgreSQL / MySQL 的集成测试默认跳过，设置环境变量后启用（Security 断言：服务端拒绝
+多语句、int8/BIGINT 精度、走私 payload 被拒）：
+
+```bash
+docker run -d --name dsh-pg -e POSTGRES_USER=testuser -e POSTGRES_PASSWORD=testpw \
+  -e POSTGRES_DB=testdb -p 15432:5432 postgres:16-alpine
+docker run -d --name dsh-my -e MYSQL_ROOT_PASSWORD=rootpw -e MYSQL_DATABASE=testdb \
+  -e MYSQL_USER=testuser -e MYSQL_PASSWORD=testpw -p 13307:3306 mysql:8.0
+
+DSH_SQL_TEST_PG=postgres://testuser:testpw@127.0.0.1:15432/testdb \
+DSH_SQL_TEST_MYSQL=mysql://testuser:testpw@127.0.0.1:13307/testdb \
+node --test test/integration.test.mjs
 ```
 
 ## License

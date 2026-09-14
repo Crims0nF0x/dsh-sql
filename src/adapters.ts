@@ -101,18 +101,42 @@ function streamMysqlQuery(corePool: { query(querySql: string): any }, sql: strin
 }
 
 /**
- * 只读查询强制走扩展协议（`queryMode: 'extended'`）。
+ * int8（OID 20）解析：安全整数返回 number，超出返回十进制字符串。
  *
- * 为什么必须：`pg` 在没有 values 时走 simple query 协议，而 simple query 会**执行**分号
- * 分隔的多条语句（`SELECT 1; DELETE FROM t` 两句都会跑）。扩展协议走 Parse/Bind/Execute，
- * PostgreSQL 对 Parse 里的多语句直接报 "cannot insert multiple commands into a prepared
- * statement"，于是「单语句」从词法约定升级为服务端强制。
+ * pg 默认把 int8 一律解析成字符串 —— 连 `42::bigint` 都返回 "42"，与本插件「安全范围内输出
+ * number、超出输出十进制字符串」的承诺不符（真实 PostgreSQL 16 实测确认）。
+ */
+function parseInt8(value: string): number | string {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : value
+}
+
+/**
+ * 查询级类型解析器：只覆盖 int8，其余交回 pg 默认实现。
+ * 走 QueryConfig.types 而不是改 `pg.types` 全局注册表，避免影响同进程其它 pg 使用者。
+ */
+const READ_TYPES = {
+  getTypeParser: (oid: number, format?: unknown) => (
+    oid === 20 ? parseInt8 : (pg.types.getTypeParser as unknown as (oid: number, format?: unknown) => unknown)(oid, format)
+  ),
+} as pg.CustomTypesConfig
+
+/**
+ * 只读查询的 QueryConfig：强制扩展协议（`queryMode: 'extended'`）+ int8 解析覆盖。
+ *
+ * 为什么必须强制扩展协议：`pg` 在没有 values 时走 simple query 协议，而 simple query 会
+ * **执行**分号分隔的多条语句（`SELECT 1; DELETE FROM t` 两句都会跑，真实 PG 16 已复现）。
+ * 扩展协议走 Parse/Bind/Execute，PostgreSQL 对 Parse 里的多语句直接报 "cannot insert
+ * multiple commands into a prepared statement"，于是「单语句」从词法约定升级为服务端强制。
  *
  * 注意 `values: []` 起不到这个作用：pg 的 `requiresPreparation()` 判断的是
  * `this.values.length > 0`，空数组仍然走 simple query。
  */
-function extendedModeConfig(sql: string): pg.QueryConfig & { queryMode: 'extended' } {
-  return { text: sql, queryMode: 'extended' }
+/** pg 运行时支持、但 @types/pg 未声明的字段（扩展协议开关）。 */
+type ReadQueryConfig = pg.QueryConfig & { queryMode: 'extended'; types: pg.CustomTypesConfig }
+
+function readQueryConfig(sql: string): ReadQueryConfig {
+  return { text: sql, queryMode: 'extended', types: READ_TYPES }
 }
 
 /** pg's `rows` option is a page size; row events avoid its full result accumulator. */
@@ -121,7 +145,7 @@ function streamPostgresQuery(client: pg.PoolClient, sql: string, limit: number, 
     let settled = false
     let columns: string[] = []
     const rows: unknown[][] = []
-    const query = new pg.Query<Record<string, unknown>>(extendedModeConfig(sql))
+    const query = new pg.Query<Record<string, unknown>>(readQueryConfig(sql))
     query.on('row', (row, result) => {
       if (settled) return
       if (columns.length === 0) columns = result?.fields.map((field) => field.name) ?? Object.keys(row)
@@ -241,6 +265,11 @@ class MysqlAdapter implements DatabaseAdapter {
       // 保持 mysql2 默认的单语句模式：这是 MySQL 侧的引擎级保证 —— 即使词法守卫被绕过，
       //  smuggled 的分号也无法变成第二条语句（只管 sql_exec 的多语句脚本会因此报错）。
       multipleStatements: false,
+      // BIGINT 保真：默认配置下 9223372036854775807 会被静默读成 9223372036854776000
+      // （真实 MySQL 8.0 实测）；这两个选项让超出安全整数范围的值以十进制字符串返回，
+      // 范围内的仍是 number，与新描述一致。
+      supportBigNumbers: true,
+      bigNumberStrings: false,
     })
   }
   private async withSignalConnection<T>(signal: AbortSignal | undefined, work: (connection: mysql.PoolConnection, discard: () => void) => Promise<T>): Promise<T> {
@@ -287,9 +316,14 @@ class MysqlAdapter implements DatabaseAdapter {
   }
   async query(sql: string, limit?: number, signal?: AbortSignal) {
     if (limit === undefined || limit <= 0) {
-      const [rows] = await this.queryRows(sql, signal) as unknown as [Array<Record<string, unknown>>, unknown]
-      return rowsToColumns(rows)
+      const [rows] = await this.queryRows(sql, signal) as unknown as [unknown, unknown]
+      // 不产生结果集的语句（例如 `SELECT ... INTO OUTFILE`）返回的是 ResultSetHeader，
+      // 不是行数组：直接喂给 rowsToColumns 会抛 `rows.map is not a function`（真实 MySQL 8.0 实测）。
+      return rowsToColumns(Array.isArray(rows) ? rows as Array<Record<string, unknown>> : [])
     }
+    // 流式读路径的前提是该语句会产生结果集。mysql2 的 Readable 只在核心命令 end 时收尾，
+    // 而「只有 OK 包、没有结果集」的语句不会触发它 —— 那种语句在 sql_query 里已被守卫
+    // （INTO / FOR UPDATE 等）挡掉，这里依赖该不变量。
     return await this.withSignalConnection(signal, async (connection, discard) => {
       const coreConnection = (connection as unknown as { connection: { query(querySql: string): any } }).connection
       return await streamMysqlQuery(coreConnection, sql, limit, discard)
@@ -387,7 +421,7 @@ class PostgresAdapter implements DatabaseAdapter {
   }
   async query(sql: string, limit?: number, signal?: AbortSignal) {
     if (limit === undefined || limit <= 0) {
-      const result = await this.queryWithSignal(extendedModeConfig(sql), undefined, signal)
+      const result = await this.queryWithSignal(readQueryConfig(sql), undefined, signal)
       const rows = result.rows as Array<Record<string, unknown>>
       return rowsToColumns(rows)
     }

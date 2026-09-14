@@ -84,6 +84,16 @@ test('已有规则未被削弱：data-modifying CTE / INTO / 行锁 / 白名单'
   assert.equal(assertReadQuery('EXPLAIN SELECT 1', 'postgres'), 'EXPLAIN SELECT 1')
 })
 
+test('EXPLAIN ANALYZE 这类只读诊断不被误伤，独立 ANALYZE 仍被拒', () => {
+  // 真实 PG 16 上已验证 EXPLAIN (ANALYZE) 在扩展协议下可正常执行
+  assert.equal(assertReadQuery('EXPLAIN ANALYZE SELECT 1', 'postgres'), 'EXPLAIN ANALYZE SELECT 1')
+  assert.equal(assertReadQuery('EXPLAIN (ANALYZE, FORMAT TEXT) SELECT 1', 'postgres'), 'EXPLAIN (ANALYZE, FORMAT TEXT) SELECT 1')
+  assert.throws(() => assertReadQuery('ANALYZE t', 'postgres'), /只接受只读语句/)
+  assert.throws(() => assertReadQuery('ANALYZE', 'sqlite'), /只接受只读语句/)
+  assert.throws(() => assertReadQuery('EXPLAIN ANALYZE DELETE FROM t', 'postgres'), /DELETE/)
+  assert.throws(() => assertReadQuery('EXPLAIN (ANALYZE) CREATE TABLE x AS SELECT 1', 'postgres'), /CREATE/)
+})
+
 // ---------- 引擎级兜底 ----------
 
 test('SQLite 读路径有引擎级兜底：写语句被数据库拒绝且 query_only 会复位', async () => {

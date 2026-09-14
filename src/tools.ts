@@ -233,8 +233,14 @@ function stripSqlNoise(sql: string, dialect: SqlDialect): string {
   return out
 }
 
-/** 写操作关键字：出在 SELECT/EXPLAIN/WITH 语句里即拒绝。 */
-const WRITE_KEYWORDS = /\b(insert|update|delete|replace|merge|drop|alter|create|truncate|call|execute|copy|grant|revoke|attach|detach|vacuum|reindex|refresh|set|reset|begin|commit|rollback|savepoint|release|analyze|load_extension)\b/i
+/**
+ * 写操作关键字：出现在 SELECT/EXPLAIN/WITH 语句里即拒绝。
+ *
+ * 不含 `analyze`：独立的 `ANALYZE` 语句已经被 READ_KEYWORDS 白名单挡在门外，把它留在扫描里
+ * 只会误伤 `EXPLAIN ANALYZE SELECT ...` 这类只读诊断（真实 PostgreSQL 16 已实测其在扩展协议
+ * 下可正常执行）；而 `EXPLAIN ANALYZE DELETE ...` 里真正写库的 `delete` 仍会被抓到。
+ */
+const WRITE_KEYWORDS = /\b(insert|update|delete|replace|merge|drop|alter|create|truncate|call|execute|copy|grant|revoke|attach|detach|vacuum|reindex|refresh|set|reset|begin|commit|rollback|savepoint|release|load_extension)\b/i
 
 /** 无参数形式本身就是写操作的 PRAGMA（`PRAGMA query_only=ON` 也拦不住其中一部分）。 */
 const PRAGMA_ALWAYS_WRITES = new Set(['optimize', 'wal_checkpoint', 'incremental_vacuum', 'shrink_memory'])
