@@ -64,8 +64,8 @@ With no connection configuration, the plugin provides a `:memory:` SQLite connec
 | Tool | Purpose | Safety |
 | :-- | :-- | :-- |
 | `sql_list` | List connections + connectivity test | — |
-| `sql_query` | Read-only queries (SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH) | Keyword whitelist + rejects multi-statement |
-| `sql_exec` | Writes / DDL (multi-statement scripts allowed) | readOnly lock + approval gate |
+| `sql_query` | Read-only queries (SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH) | Per-engine lexer + engine-enforced single statement |
+| `sql_exec` | Writes / DDL (SQLite supports multi-statement scripts) | readOnly lock + approval gate |
 | `sql_schema` | Table list / table structure | Identifier whitelist validation |
 | `sql_stats` | Table counts, row estimates, and database size | Quoted identifiers + isolated query failures |
 | `sql_health` | Connection and safety-configuration checks | Per-connection probe; passwords are never returned |
@@ -84,8 +84,10 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ## Safety
 
-- **Lexer-grade read-only guard**: sql_query strips strings/comments before validation, then rejects data-modifying CTEs (WITH…DELETE/UPDATE), SELECT INTO, FOR UPDATE/FOR SHARE, PRAGMA assignment, and multi-statement input
+- **Per-engine lexer-grade read-only guard**: sql_query strips strings/comments using the **target engine's real lexical rules** before validation (only MySQL honours backslash escapes and `#` comments, only PostgreSQL honours `$tag$`; MySQL's executable `/*!…*/` comments are scanned as code instead of being discarded), then rejects data-modifying CTEs (WITH…DELETE/UPDATE), SELECT INTO, FOR UPDATE/FOR SHARE, PRAGMA assignment and parenthesised writes (`PRAGMA journal_mode(WAL)`), write-capable PRAGMAs (`optimize`, `wal_checkpoint`, …), and multi-statement input
+- **Engine-level backstop** (a second layer beyond the lexer): PostgreSQL reads use the extended query protocol (Parse/Bind/Execute), so multi-statement input is rejected server-side with `cannot insert multiple commands into a prepared statement`; SQLite reads run inside `PRAGMA query_only`, so data-changing statements are refused by the database itself; the MySQL driver keeps `multipleStatements: false`
 - **Write approval gate**: sql_exec asks for approval by default (mirroring dsh-email's send approval); headless environments without an approval channel are denied
+- **Boundary of the approval gate**: approval can only be expressed as an `ask` decision on `tools/pre-execute` (Harness monotonic guards have no ask semantics), and that waterfall short-circuits — a third-party plugin registered **earlier** that returns `allow` without calling `next()` skips this approval. That is a Harness-level property this plugin cannot remove, so purely denying constraints such as readOnly are additionally expressed with `ctx.tools.guard()` (monotonic: deny-only, ordering cannot turn it back into permission)
 - **readOnly mode**: lock out writes entirely for production databases
 - **Streaming row cap**: SQLite iterators, MySQL Readables, and PostgreSQL Query row events collect at most maxRows+1 rows and flag overflow with truncated. MySQL and PostgreSQL close the query's dedicated connection at the cap; smaller results return the connection to the pool, without materializing the full result in memory
 - **Cancellation-aware execution**: queries and writes observe Harness `exec.signal`; cancellation stops waiting and destroys the active dedicated MySQL/PostgreSQL connection

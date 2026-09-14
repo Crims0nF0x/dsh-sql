@@ -64,8 +64,8 @@ dsh plugin --profile web remove dsh-sql
 | 工具 | 作用 | 安全 |
 | :-- | :-- | :-- |
 | `sql_list` | 列出连接 + 连通性测试 | — |
-| `sql_query` | 只读查询（SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH）| 关键字白名单 + 拒绝多语句 |
-| `sql_exec` | 写操作/DDL（可多语句脚本）| readOnly 禁用 + 审批门 |
+| `sql_query` | 只读查询（SELECT/PRAGMA/EXPLAIN/SHOW/DESCRIBE/WITH）| 逐引擎词法校验 + 引擎级单语句强制 |
+| `sql_exec` | 写操作/DDL（SQLite 支持多语句脚本）| readOnly 禁用 + 审批门 |
 | `sql_schema` | 表清单 / 表结构 | 标识符白名单校验 |
 | `sql_stats` | 表数量、行数与库体积概览 | 表名引用 + 查询失败隔离 |
 | `sql_health` | 连接与安全配置自检 | 逐连接探活，不回显密码 |
@@ -84,8 +84,10 @@ sql_exec { sql: UPDATE orders SET status = 'paid' WHERE id = 42 }
 
 ## 安全设计
 
-- **词法级只读保护**：sql_query 先剥离字符串/注释再校验，拒绝 data-modifying CTE（WITH…DELETE/UPDATE）、SELECT INTO、FOR UPDATE/FOR SHARE、PRAGMA 赋值与多语句
+- **逐引擎词法只读保护**：sql_query 按**目标引擎的真实词法**剥离字符串/注释后再校验（只有 MySQL 认反斜杠转义与 `#` 注释，只有 PostgreSQL 认 `$tag$`；MySQL 的 `/*!…*/` 可执行注释按代码扫描而不是当注释丢弃），拒绝 data-modifying CTE（WITH…DELETE/UPDATE）、SELECT INTO、FOR UPDATE/FOR SHARE、PRAGMA 赋值与括号写形式（`PRAGMA journal_mode(WAL)`）、写型 PRAGMA（`optimize` / `wal_checkpoint` 等）与多语句
+- **引擎级兜底**（词法之外的第二道）：PostgreSQL 读查询走扩展协议（Parse/Bind/Execute），多语句由服务端报 `cannot insert multiple commands into a prepared statement` 拒绝；SQLite 读路径整段包在 `PRAGMA query_only` 里，改数据的语句由数据库自己拒绝；MySQL 驱动保持 `multipleStatements: false`
 - **写审批门**：sql_exec 默认弹审批（对齐 dsh-email 的发信审批），headless 环境无审批通道时拒绝执行
+- **审批门的边界**：审批只能用 `tools/pre-execute` 的 `ask` 决策表达（Harness 的单调 guard 没有 ask 语义），而 waterfall 是顺序短路 —— 若**更早注册**的第三方插件不调 `next()` 直接返回 allow，本审批会被跳过。这是 Harness 层面的性质、插件侧消除不了，因此 readOnly 这类纯拒绝约束用 `ctx.tools.guard()`（单调、只能拒绝、排序无法翻回放行）表达
 - **readOnly 模式**：生产库可整体禁用写
 - **流式行数钳制**：SQLite 迭代器 / MySQL Readable / PostgreSQL Query 行事件最多收集 maxRows+1 行，超量标记 truncated；MySQL 和 PostgreSQL 在达到上限时关闭该查询的专用连接，未达上限则正常归还连接池，避免全量结果驻留内存
 - **可取消执行**：查询与写操作遵守 Harness 的 `exec.signal`；取消时会中止等待并销毁正在工作的 MySQL/PostgreSQL 专用连接

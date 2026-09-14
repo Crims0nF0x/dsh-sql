@@ -4,7 +4,7 @@
  * @module dsh-sql/tools
  */
 import { createAdapter, type DatabaseAdapter } from './adapters.js'
-import { type ResolvedSqlConfig } from './config.js'
+import { type ResolvedSqlConfig, type SqlConnectionConfig, type SqlEngine } from './config.js'
 
 /** 模型可见的内容块。 */
 export interface ContentBlock {
@@ -62,32 +62,127 @@ function executionSignal(exec: unknown): AbortSignal | undefined {
 /** 只读语句关键字白名单。 */
 const READ_KEYWORDS = /^(select|pragma|explain|show|describe|desc|with)\b/i
 
-/** 去掉字符串、引号标识符与注释，保留真实 SQL 关键字与分号。 */
-function stripSqlNoise(sql: string): string {
+/**
+ * 各引擎的词法方言。
+ *
+ * 安全前提：去噪器只能剥掉「目标引擎自己也认为是字符串/注释」的片段。若把引擎会执行的
+ * 内容当注释或字符串剥掉，其中的分号与写关键字就对守卫隐身 —— 只读绕过全部出自这一类：
+ * 把 MySQL 的反斜杠转义与 `#` 注释套用到 PostgreSQL、把可执行的 `/*!...` 版本注释当普通
+ * 注释丢弃、在标识符里认反斜杠吞掉闭合引号。
+ */
+interface SqlDialect {
+  /** 字符串里 `\` 是否转义（MySQL 是；PostgreSQL/SQLite 里 `\` 是普通字符）。 */
+  backslashEscapes: boolean
+  /** `#` 是否行注释（仅 MySQL；PostgreSQL 里 `#` 是异或运算符）。 */
+  hashComment: boolean
+  /** `--` 后是否必须有空白才算注释（仅 MySQL；`--x` 在 MySQL 里是表达式）。 */
+  dashCommentNeedsSpace: boolean
+  /** 块注释是否可嵌套（PostgreSQL 可嵌套，MySQL/SQLite 不可）。 */
+  nestedBlockComments: boolean
+  /** `/*!` `/*+` 是否可执行注释（仅 MySQL）：必须当代码扫描，不能当注释丢弃。 */
+  executableComments: boolean
+  /** 是否支持 `$tag$...$tag$` 字符串（仅 PostgreSQL）。 */
+  dollarQuotedStrings: boolean
+  /** 是否支持 `[...]` 标识符（仅 SQLite）。 */
+  bracketIdentifiers: boolean
+}
+
+const DIALECTS: Record<SqlEngine, SqlDialect> = {
+  sqlite: {
+    backslashEscapes: false,
+    hashComment: false,
+    dashCommentNeedsSpace: false,
+    nestedBlockComments: false,
+    executableComments: false,
+    dollarQuotedStrings: false,
+    bracketIdentifiers: true,
+  },
+  mysql: {
+    backslashEscapes: true,
+    hashComment: true,
+    dashCommentNeedsSpace: true,
+    nestedBlockComments: false,
+    executableComments: true,
+    dollarQuotedStrings: false,
+    bracketIdentifiers: false,
+  },
+  postgres: {
+    backslashEscapes: false,
+    hashComment: false,
+    dashCommentNeedsSpace: false,
+    nestedBlockComments: true,
+    executableComments: false,
+    dollarQuotedStrings: true,
+    bracketIdentifiers: false,
+  },
+}
+
+/**
+ * 未指定引擎时的最保守方言：只认三种引擎都成立的字符串/注释形式，宁可误拒也不误放。
+ * 真实调用一律传入连接引擎。
+ */
+const PORTABLE_DIALECT: SqlDialect = {
+  backslashEscapes: false,
+  hashComment: false,
+  dashCommentNeedsSpace: false,
+  nestedBlockComments: false,
+  executableComments: false,
+  dollarQuotedStrings: false,
+  bracketIdentifiers: false,
+}
+
+/**
+ * 去掉字符串、引号标识符与注释，保留真实 SQL 关键字与分号。
+ * 剥离规则逐引擎精确（见 SqlDialect），否则会藏住分号或写关键字。
+ */
+function stripSqlNoise(sql: string, dialect: SqlDialect): string {
   let out = ''
   let i = 0
   while (i < sql.length) {
     const ch = sql[i]
     const next = sql[i + 1]
     if (ch === '-' && next === '-') {
-      i += 2
+      const after = sql[i + 2]
+      // MySQL 要求 `--` 后跟空白才算注释；`--x` 是表达式，当注释会藏掉后面的内容。
+      const isComment = !dialect.dashCommentNeedsSpace || after === undefined || /\s/.test(after)
+      if (isComment) {
+        i += 2
+        while (i < sql.length && sql[i] !== '\n') i += 1
+        continue
+      }
+      out += ch
+      i += 1
+      continue
+    }
+    if (ch === '#' && dialect.hashComment) {
+      i += 1
       while (i < sql.length && sql[i] !== '\n') i += 1
       continue
     }
     if (ch === '/' && next === '*') {
-      i += 2
-      while (i + 1 < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) i += 1
-      i += 2
-      continue
-    }
-    if (ch === '#' && (i === 0 || /\s/.test(sql[i - 1]))) {
-      if (/^#(?:>>?|-)/.test(sql.slice(i))) {
-        out += ch
-        i += 1
+      // MySQL 的版本注释 `/*!...` 与优化器提示 `/*+...` 会被服务端执行/解析，
+      // 必须当代码保留，后面的写关键字与多语句检查才能看见里面的内容。
+      const executable = dialect.executableComments && (sql[i + 2] === '!' || sql[i + 2] === '+')
+      if (!executable) {
+        i += 2
+        let depth = 1
+        while (i < sql.length && depth > 0) {
+          if (dialect.nestedBlockComments && sql[i] === '/' && sql[i + 1] === '*') {
+            depth += 1
+            i += 2
+            continue
+          }
+          if (sql[i] === '*' && sql[i + 1] === '/') {
+            depth -= 1
+            i += 2
+            continue
+          }
+          i += 1
+        }
         continue
       }
+      out += ch
       i += 1
-      while (i < sql.length && sql[i] !== '\n') i += 1
       continue
     }
     if (ch === "'") {
@@ -96,29 +191,33 @@ function stripSqlNoise(sql: string): string {
       while (i < sql.length) {
         if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue }
         if (sql[i] === "'") { i += 1; break }
-        if (sql[i] === '\\') { i += 2; continue }
+        if (dialect.backslashEscapes && sql[i] === '\\') { i += 2; continue }
         i += 1
       }
       continue
     }
     if (ch === '"' || ch === '`') {
+      // MySQL 的 `"..."` 是字符串（受反斜杠转义影响）；其它引擎里 `"..."` / `` `...` `` 是
+      // 标识符，只能用双写转义：标识符里认反斜杠会吞掉闭合引号，藏住后面的语句。
+      const backslashInString = ch === '"' && dialect.backslashEscapes
       out += ' '
       i += 1
       while (i < sql.length) {
+        if (sql[i] === ch && sql[i + 1] === ch) { i += 2; continue }
         if (sql[i] === ch) { i += 1; break }
-        if (sql[i] === '\\') { i += 2; continue }
+        if (backslashInString && sql[i] === '\\') { i += 2; continue }
         i += 1
       }
       continue
     }
-    if (ch === '[') {
+    if (ch === '[' && dialect.bracketIdentifiers) {
       out += ' '
       i += 1
       while (i < sql.length && sql[i] !== ']') i += 1
       i += 1
       continue
     }
-    if (ch === '$') {
+    if (ch === '$' && dialect.dollarQuotedStrings) {
       const dollar = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sql.slice(i))
       if (dollar !== null) {
         out += ' '
@@ -137,10 +236,34 @@ function stripSqlNoise(sql: string): string {
 /** 写操作关键字：出在 SELECT/EXPLAIN/WITH 语句里即拒绝。 */
 const WRITE_KEYWORDS = /\b(insert|update|delete|replace|merge|drop|alter|create|truncate|call|execute|copy|grant|revoke|attach|detach|vacuum|reindex|refresh|set|reset|begin|commit|rollback|savepoint|release|analyze|load_extension)\b/i
 
-/** 校验只读查询：词法去噪后白名单开头 + 写关键字扫描 + 单语句。 */
-export function assertReadQuery(sql: string): string {
+/** 无参数形式本身就是写操作的 PRAGMA（`PRAGMA query_only=ON` 也拦不住其中一部分）。 */
+const PRAGMA_ALWAYS_WRITES = new Set(['optimize', 'wal_checkpoint', 'incremental_vacuum', 'shrink_memory'])
+
+/** 无参数形式是读、带参数才是写的 PRAGMA（如 `PRAGMA journal_mode` 读 vs `journal_mode(WAL)` 写）。 */
+const PRAGMA_ARG_WRITES = new Set([
+  'journal_mode', 'synchronous', 'locking_mode', 'auto_vacuum', 'cache_size', 'cache_spill',
+  'mmap_size', 'page_size', 'max_page_count', 'secure_delete', 'temp_store', 'user_version',
+  'application_id', 'encoding', 'wal_autocheckpoint', 'foreign_keys', 'defer_foreign_keys',
+  'recursive_triggers', 'reverse_unordered_selects', 'writable_schema', 'query_only',
+  'trusted_schema', 'legacy_alter_table', 'ignore_check_constraints', 'analysis_limit',
+  'threads', 'soft_heap_limit', 'hard_heap_limit', 'cell_size_check', 'read_uncommitted',
+])
+
+/** 取出 `PRAGMA` 之后的 pragma 名。 */
+function pragmaName(single: string): string {
+  return /^pragma\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(single)?.[1]?.toLowerCase() ?? ''
+}
+
+/**
+ * 校验只读查询：按引擎方言去噪后白名单开头 + 写关键字扫描 + 单语句。
+ *
+ * engine 省略时使用最保守的可移植方言；工具调用一律传入连接引擎，方言错误会直接
+ * 导致绕过（见 SqlDialect）。
+ */
+export function assertReadQuery(sql: string, engine?: SqlEngine): string {
+  const dialect = engine === undefined ? PORTABLE_DIALECT : DIALECTS[engine]
   const trimmed = sql.trim()
-  const clean = stripSqlNoise(trimmed)
+  const clean = stripSqlNoise(trimmed, dialect)
   const first = /^[a-z]+/i.exec(clean.trim())?.[0]?.toLowerCase() ?? ''
   if (!READ_KEYWORDS.test(clean.trim())) {
     throw new Error('sql_query 只接受只读语句（SELECT / PRAGMA / EXPLAIN / SHOW / DESCRIBE / WITH）。写操作请用 sql_exec。')
@@ -150,6 +273,10 @@ export function assertReadQuery(sql: string): string {
   const single = statements[0]?.trim() ?? ''
   if (first === 'pragma') {
     if (/=/.test(single)) throw new Error('sql_query 不接受带赋值参数的 PRAGMA 写操作（如 PRAGMA journal_mode=WAL），请用 sql_exec。')
+    // 括号写法 `PRAGMA journal_mode(WAL)` 同样是写操作，`=` 检查看不见它。
+    const name = pragmaName(single)
+    if (PRAGMA_ALWAYS_WRITES.has(name)) throw new Error('sql_query 不接受会改库的 PRAGMA ' + name + '，请用 sql_exec。')
+    if (PRAGMA_ARG_WRITES.has(name) && /\(/.test(single)) throw new Error('sql_query 不接受带参数的 PRAGMA ' + name + '(...) 写操作，请用 sql_exec。')
   } else if (first === 'show' || first === 'describe' || first === 'desc') {
     // SHOW / DESCRIBE 本身只读，不再扫写关键字（避免误伤 SHOW CREATE TABLE）。
   } else {
@@ -303,12 +430,18 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
   const cfg = config
   const adapters = new Map<string, DatabaseAdapter>()
 
-  const getAdapter = (name: string | undefined): { adapter: DatabaseAdapter; name: string } => {
+  /** 只解析连接配置（不建连接），让词法守卫在触库前就能拿到目标引擎。 */
+  const findConnection = (name: string | undefined): SqlConnectionConfig => {
     const target = name ?? cfg.connections[0].name
     const connection = cfg.connections.find((item) => item.name.toLowerCase() === target.toLowerCase())
     if (connection === undefined) {
       throw new Error('未找到名为 ' + target + ' 的数据库连接。可用 sql_list 查看连接清单。')
     }
+    return connection
+  }
+
+  const getAdapter = (name: string | undefined): { adapter: DatabaseAdapter; name: string } => {
+    const connection = findConnection(name)
     let adapter = adapters.get(connection.name)
     if (adapter === undefined) {
       adapter = createAdapter(connection)
@@ -367,7 +500,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
 
   const sqlQuery: SqlToolDefinition = {
     name: 'sql_query',
-    description: '执行只读 SQL 查询（SELECT / PRAGMA / EXPLAIN / SHOW / DESCRIBE / WITH）。词法级校验会拒绝 data-modifying CTE、SELECT INTO、FOR UPDATE/FOR SHARE、PRAGMA 赋值与多语句。connection 为连接名（缺省第一个连接）。返回列名与行数据，最多 maxRows 行（超出 truncated=true）。写操作请用 sql_exec。',
+    description: '执行只读 SQL 查询（SELECT / PRAGMA / EXPLAIN / SHOW / DESCRIBE / WITH）。按目标引擎的词法校验：拒绝 data-modifying CTE、SELECT INTO、FOR UPDATE/FOR SHARE、MySQL 可执行注释、PRAGMA 赋值与括号写形式、多语句；PostgreSQL 另走扩展协议由服务端拒绝多语句。connection 为连接名（缺省第一个连接）。返回列名与行数据，最多 maxRows 行（超出 truncated=true）。写操作请用 sql_exec。',
     parameters: compileParameters({
       sql: { type: 'string', required: true, description: '只读 SQL 语句（必填，单条）。' },
       connection: { type: 'string', description: '连接名（可选，缺省第一个连接）。' },
@@ -392,8 +525,10 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
     },
     async execute(rawArgs: unknown, exec: unknown) {
       const args = asRecord(rawArgs)
-      const sql = assertReadQuery(requiredString(args, 'sql', 'SQL 语句'))
-      const { adapter, name } = getAdapter(optionalString(args, 'connection'))
+      // 先拿引擎再校验：词法规则逐引擎不同，用错方言会直接导致只读绕过。
+      const connection = findConnection(optionalString(args, 'connection'))
+      const sql = assertReadQuery(requiredString(args, 'sql', 'SQL 语句'), connection.engine)
+      const { adapter, name } = getAdapter(connection.name)
       const result = await adapter.query(sql, cfg.maxRows + 1, executionSignal(exec))
       const total = result.rows.length
       const rows = result.rows.slice(0, cfg.maxRows)
@@ -418,7 +553,7 @@ export function buildSqlTools(config: ResolvedSqlConfig): { tools: SqlToolDefini
 
   const sqlExec: SqlToolDefinition = {
     name: 'sql_exec',
-    description: '执行写操作或 DDL（INSERT / UPDATE / DELETE / CREATE / ALTER / DROP 等，可多语句脚本）。受 readOnly 模式与写审批门双重保护。返回影响行数（多语句时为 0）。',
+    description: '执行写操作或 DDL（INSERT / UPDATE / DELETE / CREATE / ALTER / DROP 等）。受 readOnly 模式与写审批门双重保护。返回影响行数：SQLite 多语句脚本返回 0，MySQL 驱动默认只接受单条语句，PostgreSQL 简单查询可跑多语句并返回最后一条的行数。',
     parameters: compileParameters({
       sql: { type: 'string', required: true, description: '写操作/DDL SQL（必填）。' },
       connection: { type: 'string', description: '连接名（可选，缺省第一个连接）。' },

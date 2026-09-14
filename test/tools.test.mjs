@@ -93,7 +93,9 @@ test('工具执行把 exec.signal 传入数据库适配器', async () => {
 test('assertReadQuery 不误伤字符串/注释里的分号与写关键字', () => {
   assert.equal(assertReadQuery("SELECT 'delete;' AS label"), "SELECT 'delete;' AS label")
   assert.equal(assertReadQuery('SELECT 1 -- 注释里的 update\n'), 'SELECT 1 -- 注释里的 update')
-  assert.equal(assertReadQuery('SELECT $tag$; update$tag$ AS body'), 'SELECT $tag$; update$tag$ AS body')
+  // $tag$ 字符串是 PostgreSQL 专有词法：只有显式传 postgres 才按字符串剥离，
+  // 未指定引擎时用最保守方言（见 readonly-guard.test.mjs）。
+  assert.equal(assertReadQuery('SELECT $tag$; update$tag$ AS body', 'postgres'), 'SELECT $tag$; update$tag$ AS body')
   assert.equal(assertReadQuery("SELECT data #>> '{a,b}' AS value FROM t"), "SELECT data #>> '{a,b}' AS value FROM t")
 })
 

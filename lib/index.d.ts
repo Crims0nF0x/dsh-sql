@@ -30,10 +30,17 @@ interface SqlToolExecution {
 }
 /** Harness `tools/pre-execute` waterfall 监听器。 */
 type SqlPreExecuteListener = (exec: SqlToolExecution, next: () => Promise<SqlPreToolDecision>) => Promise<SqlPreToolDecision>;
+/** Harness 单调执行 guard：返回理由即拒绝，返回 undefined 表示不改变结论。 */
+type SqlGuard = (execution: SqlToolExecution) => string | undefined;
 /** 插件所需的最小 ctx 面。 */
 export interface SqlPluginContext {
     tools: {
         register(definition: SqlToolDefinition): () => void;
+        /**
+         * Harness 的单调 guard（0.1.5 起提供）。与 `tools/pre-execute` 这种 waterfall 不同，
+         * guard 只有拒绝语义、不能被别的监听器翻回放行，所以安全约束优先用它表达。
+         */
+        guard?(guard: SqlGuard): () => void;
     };
     on(event: 'tools/pre-execute', listener: SqlPreExecuteListener): () => void;
     on(event: 'dispose', listener: () => void): () => void;

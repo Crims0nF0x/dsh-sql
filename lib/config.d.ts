@@ -3,10 +3,12 @@
  *
  * @module dsh-sql/config
  */
+/** 支持的数据库引擎。 */
+export type SqlEngine = 'sqlite' | 'mysql' | 'postgres';
 /** 单个数据库连接（行配置）。 */
 export interface SqlConnectionConfig {
     name: string;
-    engine: 'sqlite' | 'mysql' | 'postgres';
+    engine: SqlEngine;
     file?: string;
     host?: string;
     port?: number;

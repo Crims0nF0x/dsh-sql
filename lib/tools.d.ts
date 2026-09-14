@@ -4,7 +4,7 @@
  * @module dsh-sql/tools
  */
 import { type DatabaseAdapter } from './adapters.js';
-import { type ResolvedSqlConfig } from './config.js';
+import { type ResolvedSqlConfig, type SqlEngine } from './config.js';
 /** 模型可见的内容块。 */
 export interface ContentBlock {
     type: 'text';
@@ -26,8 +26,13 @@ export interface SqlToolDefinition {
     execute(args: unknown, exec: unknown): Promise<unknown>;
     timeoutMs?: number;
 }
-/** 校验只读查询：词法去噪后白名单开头 + 写关键字扫描 + 单语句。 */
-export declare function assertReadQuery(sql: string): string;
+/**
+ * 校验只读查询：按引擎方言去噪后白名单开头 + 写关键字扫描 + 单语句。
+ *
+ * engine 省略时使用最保守的可移植方言；工具调用一律传入连接引擎，方言错误会直接
+ * 导致绕过（见 SqlDialect）。
+ */
+export declare function assertReadQuery(sql: string, engine?: SqlEngine): string;
 /** 查询结果转 CSV 文本（RFC 4180 风格转义）。 */
 export declare function toCsv(columns: string[], rows: unknown[][]): string;
 /** 审批执行上下文的最小面。 */

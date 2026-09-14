@@ -100,13 +100,28 @@ function streamMysqlQuery(corePool: { query(querySql: string): any }, sql: strin
   })
 }
 
+/**
+ * 只读查询强制走扩展协议（`queryMode: 'extended'`）。
+ *
+ * 为什么必须：`pg` 在没有 values 时走 simple query 协议，而 simple query 会**执行**分号
+ * 分隔的多条语句（`SELECT 1; DELETE FROM t` 两句都会跑）。扩展协议走 Parse/Bind/Execute，
+ * PostgreSQL 对 Parse 里的多语句直接报 "cannot insert multiple commands into a prepared
+ * statement"，于是「单语句」从词法约定升级为服务端强制。
+ *
+ * 注意 `values: []` 起不到这个作用：pg 的 `requiresPreparation()` 判断的是
+ * `this.values.length > 0`，空数组仍然走 simple query。
+ */
+function extendedModeConfig(sql: string): pg.QueryConfig & { queryMode: 'extended' } {
+  return { text: sql, queryMode: 'extended' }
+}
+
 /** pg's `rows` option is a page size; row events avoid its full result accumulator. */
 function streamPostgresQuery(client: pg.PoolClient, sql: string, limit: number, discard: () => void): Promise<QueryResult> {
   return new Promise<QueryResult>((resolve, reject) => {
     let settled = false
     let columns: string[] = []
     const rows: unknown[][] = []
-    const query = new pg.Query<Record<string, unknown>>(sql)
+    const query = new pg.Query<Record<string, unknown>>(extendedModeConfig(sql))
     query.on('row', (row, result) => {
       if (settled) return
       if (columns.length === 0) columns = result?.fields.map((field) => field.name) ?? Object.keys(row)
@@ -163,21 +178,30 @@ class SqliteAdapter implements DatabaseAdapter {
   }
   async query(sql: string, limit?: number, signal?: AbortSignal) {
     signal?.throwIfAborted()
-    const statement = this.db.prepare(sql)
-    if (limit === undefined || limit <= 0) {
-      const rows = statement.all() as Array<Record<string, unknown>>
-      signal?.throwIfAborted()
-      return rowsToColumns(rows)
+    // 引擎级兜底：读取路径整段包在 query_only 里，即使词法守卫被绕过，改数据的语句也会被
+    // SQLite 自己拒绝（query_only 拦不住 journal_mode(WAL)/optimize 这类 PRAGMA，那部分由
+    // assertReadQuery 的 PRAGMA 规则负责）。
+    // node:sqlite 全同步，这段没有 await，不会与 sql_exec 交错。
+    this.db.exec('PRAGMA query_only = ON')
+    try {
+      const statement = this.db.prepare(sql)
+      if (limit === undefined || limit <= 0) {
+        const rows = statement.all() as Array<Record<string, unknown>>
+        signal?.throwIfAborted()
+        return rowsToColumns(rows)
+      }
+      const columns = statement.columns().map((column) => column.name)
+      const rows: unknown[][] = []
+      for (const raw of statement.iterate()) {
+        const row = raw as Record<string, unknown>
+        rows.push(columns.map((name) => toValue(row[name])))
+        signal?.throwIfAborted()
+        if (rows.length >= limit) break
+      }
+      return { columns, rows }
+    } finally {
+      this.db.exec('PRAGMA query_only = OFF')
     }
-    const columns = statement.columns().map((column) => column.name)
-    const rows: unknown[][] = []
-    for (const raw of statement.iterate()) {
-      const row = raw as Record<string, unknown>
-      rows.push(columns.map((name) => toValue(row[name])))
-      signal?.throwIfAborted()
-      if (rows.length >= limit) break
-    }
-    return { columns, rows }
   }
   async exec(sql: string, signal?: AbortSignal) {
     signal?.throwIfAborted()
@@ -214,6 +238,9 @@ class MysqlAdapter implements DatabaseAdapter {
       database: connection.database ?? '',
       connectionLimit: 5,
       enableKeepAlive: true,
+      // 保持 mysql2 默认的单语句模式：这是 MySQL 侧的引擎级保证 —— 即使词法守卫被绕过，
+      //  smuggled 的分号也无法变成第二条语句（只管 sql_exec 的多语句脚本会因此报错）。
+      multipleStatements: false,
     })
   }
   private async withSignalConnection<T>(signal: AbortSignal | undefined, work: (connection: mysql.PoolConnection, discard: () => void) => Promise<T>): Promise<T> {
@@ -360,7 +387,7 @@ class PostgresAdapter implements DatabaseAdapter {
   }
   async query(sql: string, limit?: number, signal?: AbortSignal) {
     if (limit === undefined || limit <= 0) {
-      const result = await this.queryWithSignal(sql, undefined, signal)
+      const result = await this.queryWithSignal(extendedModeConfig(sql), undefined, signal)
       const rows = result.rows as Array<Record<string, unknown>>
       return rowsToColumns(rows)
     }

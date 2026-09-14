@@ -34,9 +34,19 @@ type SqlPreExecuteListener = (
   next: () => Promise<SqlPreToolDecision>,
 ) => Promise<SqlPreToolDecision>
 
+/** Harness 单调执行 guard：返回理由即拒绝，返回 undefined 表示不改变结论。 */
+type SqlGuard = (execution: SqlToolExecution) => string | undefined
+
 /** 插件所需的最小 ctx 面。 */
 export interface SqlPluginContext {
-  tools: { register(definition: SqlToolDefinition): () => void }
+  tools: {
+    register(definition: SqlToolDefinition): () => void
+    /**
+     * Harness 的单调 guard（0.1.5 起提供）。与 `tools/pre-execute` 这种 waterfall 不同，
+     * guard 只有拒绝语义、不能被别的监听器翻回放行，所以安全约束优先用它表达。
+     */
+    guard?(guard: SqlGuard): () => void
+  }
   on(event: 'tools/pre-execute', listener: SqlPreExecuteListener): () => void
   on(event: 'dispose', listener: () => void): () => void
 }
@@ -48,7 +58,20 @@ export function apply(ctx: SqlPluginContext, config?: SqlConfig | null): void {
   const cfg = resolveConfig(config)
 
   const { tools, adapters } = buildSqlTools(cfg)
+  const disposers: Array<() => void> = []
+
+  // readOnly 用单调 guard 表达：即使更早注册的插件在 pre-execute 里返回 allow，
+  // 也无法把 sql_exec 翻回放行。
+  if (cfg.readOnly && typeof ctx.tools.guard === 'function') {
+    disposers.push(ctx.tools.guard((exec) => (
+      exec.name === 'sql_exec' ? '当前配置 readOnly=true，sql_exec 已被禁用。' : undefined
+    )))
+  }
+
   if (cfg.writeApproval) {
+    // 审批只能用 pre-execute 的 `ask` 决策表达（guard 没有 ask 语义）。
+    // waterfall 是顺序短路：若更早注册的监听器不调 next() 直接返回 allow，本审批会被跳过。
+    // 这是 Harness 层面的性质，插件侧消除不了，已在 README 的安全设计里写明。
     ctx.on('tools/pre-execute', async (exec, next) => {
       if (exec.name !== 'sql_exec') return next()
       const args = (typeof exec.arguments === 'object' && exec.arguments !== null ? exec.arguments : {}) as Record<string, unknown>
@@ -60,7 +83,6 @@ export function apply(ctx: SqlPluginContext, config?: SqlConfig | null): void {
     })
   }
 
-  const disposers: Array<() => void> = []
   for (const definition of tools) {
     disposers.push(ctx.tools.register(definition))
   }
